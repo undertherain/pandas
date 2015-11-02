@@ -303,6 +303,7 @@ Updated PyTables Support
   to strip arbitrary characters (:issue:`2411`)
 - implement ``value_vars`` in ``melt`` to limit values to certain columns
   and add ``melt`` to pandas namespace (:issue:`2412`)
+- added ``axvlines_kwds`` to parallel coordinates plot
 
 **Bug Fixes**
 
