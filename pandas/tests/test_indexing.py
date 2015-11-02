@@ -25,6 +25,7 @@ from pandas.io.common import PerformanceWarning
 
 import pandas.util.testing as tm
 from pandas import date_range
+from numpy.testing.decorators import slow
 
 _verbose = False
 
@@ -411,6 +412,12 @@ class TestIndexing(tm.TestCase):
             df.iloc[30]
         self.assertRaises(IndexError, lambda : df.iloc[-30])
 
+        # GH10779
+        # single positive/negative indexer exceeding Series bounds should raise an IndexError
+        with tm.assertRaisesRegexp(IndexError, 'single positional indexer is out-of-bounds'):
+            s.iloc[30]
+        self.assertRaises(IndexError, lambda : s.iloc[-30])
+
         # slices are ok
         result = df.iloc[:,4:10]  # 0 < start < len < stop
         expected = df.iloc[:,4:]
@@ -471,7 +478,6 @@ class TestIndexing(tm.TestCase):
         self.assertRaises(IndexError, lambda : dfl.iloc[[4,5,6]])
         self.assertRaises(IndexError, lambda : dfl.iloc[:,4])
 
-
     def test_iloc_getitem_int(self):
 
         # integer
@@ -496,6 +502,33 @@ class TestIndexing(tm.TestCase):
         self.check_result('array int', 'iloc', np.array([0,1,2]), 'ix', { 0 : [0,2,4], 1 : [0,3,6], 2: [0,4,8] }, typs = ['ints'])
         self.check_result('array int', 'iloc', np.array([2]), 'ix', { 0 : [4], 1 : [6], 2: [8] }, typs = ['ints'])
         self.check_result('array int', 'iloc', np.array([0,1,2]), 'indexer', [0,1,2], typs = ['labels','mixed','ts','floats','empty'], fails = IndexError)
+
+    def test_iloc_getitem_neg_int_can_reach_first_index(self):
+        # GH10547 and GH10779
+        # negative integers should be able to reach index 0
+        df = DataFrame({'A': [2, 3, 5], 'B': [7, 11, 13]})
+        s = df['A']
+
+        expected = df.iloc[0]
+        result = df.iloc[-3]
+        assert_series_equal(result, expected)
+
+        expected = df.iloc[[0]]
+        result = df.iloc[[-3]]
+        assert_frame_equal(result, expected)
+
+        expected = s.iloc[0]
+        result = s.iloc[-3]
+        self.assertEqual(result, expected)
+
+        expected = s.iloc[[0]]
+        result = s.iloc[[-3]]
+        assert_series_equal(result, expected)
+
+        # check the length 1 Series case highlighted in GH10547
+        expected = pd.Series(['a'], index=['A'])
+        result = expected.iloc[[-1]]
+        assert_series_equal(result, expected)
 
     def test_iloc_getitem_dups(self):
 
@@ -559,16 +592,17 @@ class TestIndexing(tm.TestCase):
 
     def test_iloc_getitem_multiindex(self):
 
-        df = DataFrame(np.random.randn(3, 3),
+        arr = np.random.randn(3, 3)
+        df = DataFrame(arr,
                        columns=[[2,2,4],[6,8,10]],
                        index=[[4,4,8],[8,10,12]])
 
         rs = df.iloc[2]
-        xp = df.irow(2)
+        xp = Series(arr[2],index=df.columns)
         assert_series_equal(rs, xp)
 
         rs = df.iloc[:,2]
-        xp = df.icol(2)
+        xp = Series(arr[:, 2],index=df.index)
         assert_series_equal(rs, xp)
 
         rs = df.iloc[2,2]
@@ -728,32 +762,147 @@ class TestIndexing(tm.TestCase):
         result2 = s.loc[0:3]
         assert_series_equal(result1,result2)
 
-    def test_loc_setitem_multiindex(self):
+    def test_setitem_multiindex(self):
+        for index_fn in ('ix', 'loc'):
+            def check(target, indexers, value, compare_fn, expected=None):
+                fn = getattr(target, index_fn)
+                fn.__setitem__(indexers, value)
+                result = fn.__getitem__(indexers)
+                if expected is None:
+                    expected = value
+                compare_fn(result, expected)
+            # GH7190
+            index = pd.MultiIndex.from_product([np.arange(0,100), np.arange(0, 80)], names=['time', 'firm'])
+            t, n = 0, 2
+            df = DataFrame(np.nan,columns=['A', 'w', 'l', 'a', 'x', 'X', 'd', 'profit'], index=index)
+            check(
+                target=df, indexers=((t,n), 'X'),
+                value=0, compare_fn=self.assertEqual
+            )
 
-        # GH7190
-        index = pd.MultiIndex.from_product([np.arange(0,100), np.arange(0, 80)], names=['time', 'firm'])
-        t, n = 0, 2
+            df = DataFrame(-999,columns=['A', 'w', 'l', 'a', 'x', 'X', 'd', 'profit'], index=index)
+            check(
+                target=df, indexers=((t,n), 'X'),
+                value=1, compare_fn=self.assertEqual
+            )
 
-        df = DataFrame(np.nan,columns=['A', 'w', 'l', 'a', 'x', 'X', 'd', 'profit'], index=index)
-        df.loc[(t,n),'X'] = 0
-        result = df.loc[(t,n),'X']
-        self.assertEqual(result, 0)
+            df = DataFrame(columns=['A', 'w', 'l', 'a', 'x', 'X', 'd', 'profit'], index=index)
+            check(
+                target=df, indexers=((t,n), 'X'),
+                value=2, compare_fn=self.assertEqual
+            )
 
-        df = DataFrame(-999,columns=['A', 'w', 'l', 'a', 'x', 'X', 'd', 'profit'], index=index)
-        df.loc[(t,n),'X'] = 1
-        result = df.loc[(t,n),'X']
-        self.assertEqual(result, 1)
+            # GH 7218, assinging with 0-dim arrays
+            df = DataFrame(-999,columns=['A', 'w', 'l', 'a', 'x', 'X', 'd', 'profit'], index=index)
+            check(
+                target=df, indexers=((t,n), 'X'),
+                value=np.array(3), compare_fn=self.assertEqual,
+                expected=3,
+            )
 
-        df = DataFrame(columns=['A', 'w', 'l', 'a', 'x', 'X', 'd', 'profit'], index=index)
-        df.loc[(t,n),'X'] = 2
-        result = df.loc[(t,n),'X']
-        self.assertEqual(result, 2)
+            # GH5206
+            df = pd.DataFrame(
+                np.arange(25).reshape(5, 5), columns='A,B,C,D,E'.split(','),
+                dtype=float
+            )
+            df['F'] = 99
+            row_selection = df['A'] % 2 == 0
+            col_selection = ['B', 'C']
+            df.ix[row_selection, col_selection] = df['F']
+            output = pd.DataFrame(99., index=[0, 2, 4], columns=['B', 'C'])
+            assert_frame_equal(df.ix[row_selection, col_selection], output)
+            check(
+                target=df, indexers=(row_selection, col_selection),
+                value=df['F'], compare_fn=assert_frame_equal,
+                expected=output,
+            )
 
-        # GH 7218, assinging with 0-dim arrays
-        df = DataFrame(-999,columns=['A', 'w', 'l', 'a', 'x', 'X', 'd', 'profit'], index=index)
-        df.loc[(t,n), 'X'] = np.array(3)
-        result = df.loc[(t,n),'X']
-        self.assertEqual(result,3)
+            # GH11372
+            idx = pd.MultiIndex.from_product([
+                ['A', 'B', 'C'],
+                pd.date_range('2015-01-01', '2015-04-01', freq='MS')
+            ])
+            cols = pd.MultiIndex.from_product([
+                ['foo', 'bar'],
+                pd.date_range('2016-01-01', '2016-02-01', freq='MS')
+            ])
+            df = pd.DataFrame(np.random.random((12, 4)), index=idx, columns=cols)
+            subidx = pd.MultiIndex.from_tuples(
+                [('A', pd.Timestamp('2015-01-01')), ('A', pd.Timestamp('2015-02-01'))]
+            )
+            subcols = pd.MultiIndex.from_tuples(
+                [('foo', pd.Timestamp('2016-01-01')), ('foo', pd.Timestamp('2016-02-01'))]
+            )
+            vals = pd.DataFrame(np.random.random((2, 2)), index=subidx, columns=subcols)
+            check(
+                target=df, indexers=(subidx, subcols),
+                value=vals, compare_fn=assert_frame_equal,
+            )
+            # set all columns
+            vals = pd.DataFrame(np.random.random((2, 4)), index=subidx, columns=cols)
+            check(
+                target=df, indexers=(subidx, slice(None, None, None)),
+                value=vals, compare_fn=assert_frame_equal,
+            )
+            # identity
+            copy = df.copy()
+            check(
+                target=df, indexers=(df.index, df.columns),
+                value=df, compare_fn=assert_frame_equal,
+                expected=copy
+            )
+
+    def test_indexing_with_datetime_tz(self):
+
+        # 8260
+        # support datetime64 with tz
+
+        idx = Index(date_range('20130101',periods=3,tz='US/Eastern'),
+                    name='foo')
+        dr = date_range('20130110',periods=3)
+        df = DataFrame({'A' : idx, 'B' : dr})
+        df['C'] = idx
+        df.iloc[1,1] = pd.NaT
+        df.iloc[1,2] = pd.NaT
+
+        # indexing
+        result = df.iloc[1]
+        expected = Series([Timestamp('2013-01-02 00:00:00-0500', tz='US/Eastern'), np.nan, np.nan],
+                          index=list('ABC'), dtype='object', name=1)
+        assert_series_equal(result, expected)
+        result = df.loc[1]
+        expected = Series([Timestamp('2013-01-02 00:00:00-0500', tz='US/Eastern'), np.nan, np.nan],
+                          index=list('ABC'), dtype='object', name=1)
+        assert_series_equal(result, expected)
+
+        # indexing - fast_xs
+        df = DataFrame({'a': date_range('2014-01-01', periods=10, tz='UTC')})
+        result = df.iloc[5]
+        expected = Timestamp('2014-01-06 00:00:00+0000', tz='UTC', offset='D')
+        self.assertEqual(result, expected)
+
+        result = df.loc[5]
+        self.assertEqual(result, expected)
+
+        # indexing - boolean
+        result = df[df.a > df.a[3]]
+        expected = df.iloc[4:]
+        assert_frame_equal(result, expected)
+
+        # indexing - setting an element
+        df = DataFrame( data = pd.to_datetime(['2015-03-30 20:12:32','2015-03-12 00:11:11']) ,columns=['time'] )
+        df['new_col']=['new','old']
+        df.time=df.set_index('time').index.tz_localize('UTC')
+        v = df[df.new_col=='new'].set_index('time').index.tz_convert('US/Pacific')
+
+        # trying to set a single element on a part of a different timezone
+        def f():
+            df.loc[df.new_col=='new','time'] = v
+        self.assertRaises(ValueError, f)
+
+        v = df.loc[df.new_col=='new','time'] + pd.Timedelta('1s')
+        df.loc[df.new_col=='new','time'] = v
+        assert_series_equal(df.loc[df.new_col=='new','time'],v)
 
     def test_loc_setitem_dups(self):
 
@@ -1604,74 +1753,71 @@ Region_1,Site_2,3977723089,A,5/20/2015 8:33,5/20/2015 9:09,Yes,No"""
         with tm.assert_produces_warning(PerformanceWarning):
             _ = df.loc[(0,)]
 
+    @slow
     def test_multiindex_get_loc(self):  # GH7724, GH2646
 
-        # ignore the warning here
-        warnings.simplefilter('ignore', PerformanceWarning)
+        with warnings.catch_warnings(record=True):
 
-        # test indexing into a multi-index before & past the lexsort depth
-        from numpy.random import randint, choice, randn
-        cols = ['jim', 'joe', 'jolie', 'joline', 'jolia']
+            # test indexing into a multi-index before & past the lexsort depth
+            from numpy.random import randint, choice, randn
+            cols = ['jim', 'joe', 'jolie', 'joline', 'jolia']
 
-        def validate(mi, df, key):
-            mask = np.ones(len(df)).astype('bool')
+            def validate(mi, df, key):
+                mask = np.ones(len(df)).astype('bool')
 
-            # test for all partials of this key
-            for i, k in enumerate(key):
-                mask &= df.iloc[:, i] == k
+                # test for all partials of this key
+                for i, k in enumerate(key):
+                    mask &= df.iloc[:, i] == k
 
-                if not mask.any():
-                    self.assertNotIn(key[:i+1], mi.index)
-                    continue
+                    if not mask.any():
+                        self.assertNotIn(key[:i+1], mi.index)
+                        continue
 
-                self.assertIn(key[:i+1], mi.index)
-                right = df[mask].copy()
+                    self.assertIn(key[:i+1], mi.index)
+                    right = df[mask].copy()
 
-                if i + 1 != len(key):  # partial key
-                    right.drop(cols[:i+1], axis=1, inplace=True)
-                    right.set_index(cols[i+1:-1], inplace=True)
-                    assert_frame_equal(mi.loc[key[:i+1]], right)
-
-                else:  # full key
-                    right.set_index(cols[:-1], inplace=True)
-                    if len(right) == 1:  # single hit
-                        right = Series(right['jolia'].values,
-                                name=right.index[0], index=['jolia'])
-                        assert_series_equal(mi.loc[key[:i+1]], right)
-                    else:  # multi hit
+                    if i + 1 != len(key):  # partial key
+                        right.drop(cols[:i+1], axis=1, inplace=True)
+                        right.set_index(cols[i+1:-1], inplace=True)
                         assert_frame_equal(mi.loc[key[:i+1]], right)
 
-        def loop(mi, df, keys):
-            for key in keys:
-                validate(mi, df, key)
+                    else:  # full key
+                        right.set_index(cols[:-1], inplace=True)
+                        if len(right) == 1:  # single hit
+                            right = Series(right['jolia'].values,
+                                           name=right.index[0], index=['jolia'])
+                            assert_series_equal(mi.loc[key[:i+1]], right)
+                        else:  # multi hit
+                            assert_frame_equal(mi.loc[key[:i+1]], right)
 
-        n, m = 1000, 50
+            def loop(mi, df, keys):
+                for key in keys:
+                    validate(mi, df, key)
 
-        vals = [randint(0, 10, n), choice(list('abcdefghij'), n),
-                choice(pd.date_range('20141009', periods=10).tolist(), n),
-                choice(list('ZYXWVUTSRQ'), n), randn(n)]
-        vals = list(map(tuple, zip(*vals)))
+            n, m = 1000, 50
 
-        # bunch of keys for testing
-        keys = [randint(0, 11, m), choice(list('abcdefghijk'), m),
-                choice(pd.date_range('20141009', periods=11).tolist(), m),
-                choice(list('ZYXWVUTSRQP'), m)]
-        keys = list(map(tuple, zip(*keys)))
-        keys += list(map(lambda t: t[:-1], vals[::n//m]))
+            vals = [randint(0, 10, n), choice(list('abcdefghij'), n),
+                    choice(pd.date_range('20141009', periods=10).tolist(), n),
+                    choice(list('ZYXWVUTSRQ'), n), randn(n)]
+            vals = list(map(tuple, zip(*vals)))
 
-        # covers both unique index and non-unique index
-        df = pd.DataFrame(vals, columns=cols)
-        a, b = pd.concat([df, df]), df.drop_duplicates(subset=cols[:-1])
+            # bunch of keys for testing
+            keys = [randint(0, 11, m), choice(list('abcdefghijk'), m),
+                    choice(pd.date_range('20141009', periods=11).tolist(), m),
+                    choice(list('ZYXWVUTSRQP'), m)]
+            keys = list(map(tuple, zip(*keys)))
+            keys += list(map(lambda t: t[:-1], vals[::n//m]))
 
-        for frame in a, b:
-            for i in range(5):  # lexsort depth
-                df = frame.copy() if i == 0 else frame.sort(columns=cols[:i])
-                mi = df.set_index(cols[:-1])
-                assert not mi.index.lexsort_depth < i
-                loop(mi, df, keys)
+            # covers both unique index and non-unique index
+            df = pd.DataFrame(vals, columns=cols)
+            a, b = pd.concat([df, df]), df.drop_duplicates(subset=cols[:-1])
 
-        # restore
-        warnings.simplefilter('always', PerformanceWarning)
+            for frame in a, b:
+                for i in range(5):  # lexsort depth
+                    df = frame.copy() if i == 0 else frame.sort_values(by=cols[:i])
+                    mi = df.set_index(cols[:-1])
+                    assert not mi.index.lexsort_depth < i
+                    loop(mi, df, keys)
 
     def test_series_getitem_multiindex(self):
 
@@ -1728,7 +1874,8 @@ Region_1,Site_2,3977723089,A,5/20/2015 8:33,5/20/2015 9:09,Yes,No"""
         key = 4.0, 2012
 
         # emits a PerformanceWarning, ok
-        tm.assert_frame_equal(df.ix[key], df.iloc[2:])
+        with self.assert_produces_warning(PerformanceWarning):
+            tm.assert_frame_equal(df.ix[key], df.iloc[2:])
 
         # this is ok
         df.sortlevel(inplace=True)
@@ -2501,6 +2648,12 @@ Region_1,Site_2,3977723089,A,5/20/2015 8:33,5/20/2015 9:09,Yes,No"""
 
         #if I look at df, then element [0,2] equals '_'. If instead I type df.ix[idx,'test'], I get '-----', finally by typing df.iloc[0,2] I get '_'.
 
+    def test_multitype_list_index_access(self):
+        #GH 10610
+        df = pd.DataFrame(np.random.random((10, 5)), columns=["a"] + [20, 21, 22, 23])
+        with self.assertRaises(IndexError):
+            vals = df[[22, 26, -8]]
+        self.assertEqual(df[21].shape[0], df.shape[0])
 
     def test_set_index_nan(self):
 
@@ -2618,6 +2771,44 @@ Region_1,Site_2,3977723089,A,5/20/2015 8:33,5/20/2015 9:09,Yes,No"""
             p.loc[idx,:,:] = replace
         tm.assert_panel_equal(p, expected)
 
+
+    def test_panel_setitem_with_multiindex(self):
+
+        # 10360
+        # failing with a multi-index
+        arr = np.array([[[1,2,3],[0,0,0]],[[0,0,0],[0,0,0]]],dtype=np.float64)
+
+        # reg index
+        axes = dict(items=['A', 'B'], major_axis=[0, 1], minor_axis=['X', 'Y' ,'Z'])
+        p1 = Panel(0., **axes)
+        p1.iloc[0, 0, :] = [1, 2, 3]
+        expected = Panel(arr, **axes)
+        tm.assert_panel_equal(p1, expected)
+
+        # multi-indexes
+        axes['items'] = pd.MultiIndex.from_tuples([('A','a'), ('B','b')])
+        p2 = Panel(0., **axes)
+        p2.iloc[0, 0, :] = [1, 2, 3]
+        expected = Panel(arr, **axes)
+        tm.assert_panel_equal(p2, expected)
+
+        axes['major_axis']=pd.MultiIndex.from_tuples([('A',1),('A',2)])
+        p3 = Panel(0., **axes)
+        p3.iloc[0, 0, :] = [1, 2, 3]
+        expected = Panel(arr, **axes)
+        tm.assert_panel_equal(p3, expected)
+
+        axes['minor_axis']=pd.MultiIndex.from_product([['X'],range(3)])
+        p4 = Panel(0., **axes)
+        p4.iloc[0, 0, :] = [1, 2, 3]
+        expected = Panel(arr, **axes)
+        tm.assert_panel_equal(p4, expected)
+
+        arr = np.array([[[1,0,0],[2,0,0]],[[0,0,0],[0,0,0]]],dtype=np.float64)
+        p5 = Panel(0., **axes)
+        p5.iloc[0, :, 0] = [1, 2]
+        expected = Panel(arr, **axes)
+        tm.assert_panel_equal(p5, expected)
 
     def test_panel_assignment(self):
 
@@ -2925,7 +3116,7 @@ Region_1,Site_2,3977723089,A,5/20/2015 8:33,5/20/2015 9:09,Yes,No"""
         self.assertRaises(KeyError, df.loc.__getitem__, tuple([slice(1,2)]))
 
         # monotonic are ok
-        df = DataFrame({'A' : [1,2,3,4,5,6], 'B' : [3,4,5,6,7,8]}, index = [0,1,0,1,2,3]).sort(axis=0)
+        df = DataFrame({'A' : [1,2,3,4,5,6], 'B' : [3,4,5,6,7,8]}, index = [0,1,0,1,2,3]).sort_index(axis=0)
         result = df.loc[1:]
         expected = DataFrame({'A' : [2,4,5,6], 'B' : [4, 6,7,8]}, index = [1,1,2,3])
         assert_frame_equal(result,expected)
@@ -3060,8 +3251,7 @@ Region_1,Site_2,3977723089,A,5/20/2015 8:33,5/20/2015 9:09,Yes,No"""
         assert_frame_equal(df,expected)
 
         df = df_orig.copy()
-        df.iloc[:,0:2] = df.iloc[:,0:2].convert_objects(datetime=True,
-                                                        numeric=True)
+        df.iloc[:,0:2] = df.iloc[:,0:2]._convert(datetime=True, numeric=True)
         expected =  DataFrame([[1,2,'3','.4',5,6.,'foo']],columns=list('ABCDEFG'))
         assert_frame_equal(df,expected)
 
@@ -3833,10 +4023,9 @@ Region_1,Site_2,3977723089,A,5/20/2015 8:33,5/20/2015 9:09,Yes,No"""
         self.assertRaises(com.SettingWithCopyError, f)
 
         df = DataFrame(np.random.randn(10,4))
-        s = df.iloc[:,0]
-        s = s.order()
-        assert_series_equal(s,df.iloc[:,0].order())
-        assert_series_equal(s,df[0].order())
+        s = df.iloc[:,0].sort_values()
+        assert_series_equal(s,df.iloc[:,0].sort_values())
+        assert_series_equal(s,df[0].sort_values())
 
         # false positives GH6025
         df = DataFrame ({'column1':['a', 'a', 'a'], 'column2': [4,8,9] })
@@ -4103,9 +4292,17 @@ Region_1,Site_2,3977723089,A,5/20/2015 8:33,5/20/2015 9:09,Yes,No"""
 
         def check_iloc_compat(s):
             # invalid type for iloc (but works with a warning)
-            self.assert_produces_warning(FutureWarning, lambda : s.iloc[6.0:8])
-            self.assert_produces_warning(FutureWarning, lambda : s.iloc[6.0:8.0])
-            self.assert_produces_warning(FutureWarning, lambda : s.iloc[6:8.0])
+            # check_stacklevel=False -> impossible to get it right for all
+            # index types
+            with self.assert_produces_warning(
+                    FutureWarning, check_stacklevel=False):
+                s.iloc[6.0:8]
+            with self.assert_produces_warning(
+                    FutureWarning, check_stacklevel=False):
+                s.iloc[6.0:8.0]
+            with self.assert_produces_warning(
+                    FutureWarning, check_stacklevel=False):
+                s.iloc[6:8.0]
 
         def check_slicing_positional(index):
 
@@ -4517,7 +4714,19 @@ Region_1,Site_2,3977723089,A,5/20/2015 8:33,5/20/2015 9:09,Yes,No"""
         assert_series_equal(df2.loc[:,'a'], df2.iloc[:,0])
         assert_series_equal(df2.loc[:,'a'], df2.ix[:,0])
 
+    @slow
+    def test_large_dataframe_indexing(self):
+        #GH10692
+        result = DataFrame({'x': range(10**6)},dtype='int64')
+        result.loc[len(result)] = len(result) + 1
+        expected = DataFrame({'x': range(10**6 + 1)},dtype='int64')
+        assert_frame_equal(result, expected)
 
+    @slow
+    def test_large_mi_dataframe_indexing(self):
+        #GH10645
+        result = MultiIndex.from_arrays([range(10**6), range(10**6)])
+        assert(not (10**6, 0) in result)
 
 class TestCategoricalIndex(tm.TestCase):
 

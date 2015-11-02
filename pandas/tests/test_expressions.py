@@ -97,7 +97,7 @@ class TestExpressions(tm.TestCase):
     def test_integer_arithmetic(self):
         self.run_arithmetic_test(self.integer, self.integer,
                                  assert_frame_equal)
-        self.run_arithmetic_test(self.integer.icol(0), self.integer.icol(0),
+        self.run_arithmetic_test(self.integer.iloc[:,0], self.integer.iloc[:, 0],
                                  assert_series_equal, check_dtype=True)
 
     @nose.tools.nottest
@@ -182,7 +182,7 @@ class TestExpressions(tm.TestCase):
         self.run_frame(self.integer, self.integer)
 
     def test_integer_arithmetic_series(self):
-        self.run_series(self.integer.icol(0), self.integer.icol(0))
+        self.run_series(self.integer.iloc[:, 0], self.integer.iloc[:, 0])
 
     @slow
     def test_integer_panel(self):
@@ -192,7 +192,7 @@ class TestExpressions(tm.TestCase):
         self.run_frame(self.frame2, self.frame2)
 
     def test_float_arithmetic_series(self):
-        self.run_series(self.frame2.icol(0), self.frame2.icol(0))
+        self.run_series(self.frame2.iloc[:, 0], self.frame2.iloc[:, 0])
 
     @slow
     def test_float_panel(self):
@@ -220,7 +220,7 @@ class TestExpressions(tm.TestCase):
 
     def test_float_arithemtic(self):
         self.run_arithmetic_test(self.frame, self.frame, assert_frame_equal)
-        self.run_arithmetic_test(self.frame.icol(0), self.frame.icol(0),
+        self.run_arithmetic_test(self.frame.iloc[:, 0], self.frame.iloc[:, 0],
                                  assert_series_equal, check_dtype=True)
 
     def test_mixed_arithmetic(self):
@@ -232,7 +232,7 @@ class TestExpressions(tm.TestCase):
     def test_integer_with_zeros(self):
         self.integer *= np.random.randint(0, 2, size=np.shape(self.integer))
         self.run_arithmetic_test(self.integer, self.integer, assert_frame_equal)
-        self.run_arithmetic_test(self.integer.icol(0), self.integer.icol(0),
+        self.run_arithmetic_test(self.integer.iloc[:, 0], self.integer.iloc[:, 0],
                                  assert_series_equal)
 
     def test_invalid(self):
@@ -382,32 +382,32 @@ class TestExpressions(tm.TestCase):
             fe = getattr(operator, sub_funcs[subs[op]])
 
             with tm.use_numexpr(True, min_elements=5):
-                with tm.assert_produces_warning():
+                with tm.assert_produces_warning(check_stacklevel=False):
                     r = f(df, df)
                     e = fe(df, df)
                     tm.assert_frame_equal(r, e)
 
-                with tm.assert_produces_warning():
+                with tm.assert_produces_warning(check_stacklevel=False):
                     r = f(df.a, df.b)
                     e = fe(df.a, df.b)
                     tm.assert_series_equal(r, e)
 
-                with tm.assert_produces_warning():
+                with tm.assert_produces_warning(check_stacklevel=False):
                     r = f(df.a, True)
                     e = fe(df.a, True)
                     tm.assert_series_equal(r, e)
 
-                with tm.assert_produces_warning():
+                with tm.assert_produces_warning(check_stacklevel=False):
                     r = f(False, df.a)
                     e = fe(False, df.a)
                     tm.assert_series_equal(r, e)
 
-                with tm.assert_produces_warning():
+                with tm.assert_produces_warning(check_stacklevel=False):
                     r = f(False, df)
                     e = fe(False, df)
                     tm.assert_frame_equal(r, e)
 
-                with tm.assert_produces_warning():
+                with tm.assert_produces_warning(check_stacklevel=False):
                     r = f(df, True)
                     e = fe(df, True)
                     tm.assert_frame_equal(r, e)

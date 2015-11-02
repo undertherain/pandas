@@ -98,19 +98,19 @@ class TestStata(tm.TestCase):
 
     def test_data_method(self):
         # Minimal testing of legacy data method
-        reader_114 = StataReader(self.dta1_114)
-        with warnings.catch_warnings(record=True) as w:
-            parsed_114_data = reader_114.data()
+        with StataReader(self.dta1_114) as rdr:
+            with warnings.catch_warnings(record=True) as w:
+                parsed_114_data = rdr.data()
 
-        reader_114 = StataReader(self.dta1_114)
-        parsed_114_read = reader_114.read()
+        with StataReader(self.dta1_114) as rdr:
+            parsed_114_read = rdr.read()
         tm.assert_frame_equal(parsed_114_data, parsed_114_read)
 
     def test_read_dta1(self):
-        reader_114 = StataReader(self.dta1_114)
-        parsed_114 = reader_114.read()
-        reader_117 = StataReader(self.dta1_117)
-        parsed_117 = reader_117.read()
+
+        parsed_114 = self.read_dta(self.dta1_114)
+        parsed_117 = self.read_dta(self.dta1_117)
+
         # Pandas uses np.nan as missing value.
         # Thus, all columns will be of type float, regardless of their name.
         expected = DataFrame([(np.nan, np.nan, np.nan, np.nan, np.nan)],
@@ -264,19 +264,18 @@ class TestStata(tm.TestCase):
         for col in parsed_118.columns:
             tm.assert_almost_equal(parsed_118[col], expected[col])
 
-        rdr = StataReader(self.dta22_118)
-        vl = rdr.variable_labels()
-        vl_expected = {u'Unicode_Cities_Strl': u'Here are some strls with Ünicode chars',
-                       u'Longs': u'long data',
-                       u'Things': u'Here are some things',
-                       u'Bytes': u'byte data',
-                       u'Ints': u'int data',
-                       u'Cities': u'Here are some cities',
-                       u'Floats': u'float data'}
-        tm.assert_dict_equal(vl, vl_expected)
+        with StataReader(self.dta22_118) as rdr:
+            vl = rdr.variable_labels()
+            vl_expected = {u'Unicode_Cities_Strl': u'Here are some strls with Ünicode chars',
+                           u'Longs': u'long data',
+                           u'Things': u'Here are some things',
+                           u'Bytes': u'byte data',
+                           u'Ints': u'int data',
+                           u'Cities': u'Here are some cities',
+                           u'Floats': u'float data'}
+            tm.assert_dict_equal(vl, vl_expected)
 
-        self.assertEqual(rdr.data_label, u'This is a  Ünicode data label')
-
+            self.assertEqual(rdr.data_label, u'This is a  Ünicode data label')
 
     def test_read_write_dta5(self):
         original = DataFrame([(np.nan, np.nan, np.nan, np.nan, np.nan)],
@@ -330,7 +329,8 @@ class TestStata(tm.TestCase):
         df = pd.DataFrame(np.random.randn(5,4), columns=list('abcd'))
         df.ix[2, 'a':'c'] = np.nan
         df_copy = df.copy()
-        df.to_stata('test.dta', write_index=False)
+        with tm.ensure_clean() as path:
+            df.to_stata(path, write_index=False)
         tm.assert_frame_equal(df, df_copy)
 
     def test_encoding(self):
@@ -417,9 +417,9 @@ class TestStata(tm.TestCase):
         expected = self.read_csv(self.csv14)
         cols = ['byte_', 'int_', 'long_', 'float_', 'double_']
         for col in cols:
-            expected[col] = expected[col].convert_objects(datetime=True, numeric=True)
+            expected[col] = expected[col]._convert(datetime=True, numeric=True)
         expected['float_'] = expected['float_'].astype(np.float32)
-        expected['date_td'] = pd.to_datetime(expected['date_td'], coerce=True)
+        expected['date_td'] = pd.to_datetime(expected['date_td'], errors='coerce')
 
         parsed_113 = self.read_dta(self.dta14_113)
         parsed_113.index.name = 'index'
@@ -464,7 +464,7 @@ class TestStata(tm.TestCase):
         data_label = 'This is a data file.'
         with tm.ensure_clean() as path:
             original.to_stata(path, time_stamp=time_stamp, data_label=data_label)
-	    
+
             with StataReader(path) as reader:
                 parsed_time_stamp = dt.datetime.strptime(reader.time_stamp, ('%d %b %Y %H:%M'))
                 assert parsed_time_stamp == time_stamp
@@ -475,10 +475,8 @@ class TestStata(tm.TestCase):
         original.index.name = 'index'
         with tm.ensure_clean() as path:
             # should get a warning for that format.
-            with warnings.catch_warnings(record=True) as w:
-                tm.assert_produces_warning(original.to_stata(path), InvalidColumnName)
-            # should produce a single warning
-            tm.assert_equal(len(w), 1)
+            with tm.assert_produces_warning(InvalidColumnName):
+                original.to_stata(path)
 
             written_and_read_again = self.read_dta(path)
             written_and_read_again = written_and_read_again.set_index('index')
@@ -530,11 +528,8 @@ class TestStata(tm.TestCase):
         original = DataFrame({'s0': s0, 's1': s1, 's2': s2, 's3': s3})
         original.index.name = 'index'
         with tm.ensure_clean() as path:
-            with warnings.catch_warnings(record=True) as w:
-                tm.assert_produces_warning(original.to_stata(path),
-                                           PossiblePrecisionLoss)
-            # should produce a single warning
-            tm.assert_equal(len(w), 1)
+            with tm.assert_produces_warning(PossiblePrecisionLoss):
+                original.to_stata(path)
 
             written_and_read_again = self.read_dta(path)
             modified = original.copy()
@@ -548,10 +543,8 @@ class TestStata(tm.TestCase):
         original = DataFrame([datetime(2006, 11, 19, 23, 13, 20)])
         original.index.name = 'index'
         with tm.ensure_clean() as path:
-            with warnings.catch_warnings(record=True) as w:
-                tm.assert_produces_warning(original.to_stata(path, {0: 'tc'}),
-                                           InvalidColumnName)
-            tm.assert_equal(len(w), 1)
+            with tm.assert_produces_warning(InvalidColumnName):
+                original.to_stata(path, {0: 'tc'})
 
             written_and_read_again = self.read_dta(path)
             modified = original.copy()
@@ -616,8 +609,10 @@ class TestStata(tm.TestCase):
             tm.assert_frame_equal(written_and_read_again, expected)
 
     def test_variable_labels(self):
-        sr_115 = StataReader(self.dta16_115).variable_labels()
-        sr_117 = StataReader(self.dta16_117).variable_labels()
+        with StataReader(self.dta16_115) as rdr:
+            sr_115 = rdr.variable_labels()
+        with StataReader(self.dta16_117) as rdr:
+            sr_117 = rdr.variable_labels()
         keys = ('var1', 'var2', 'var3')
         labels = ('label1', 'label2', 'label3')
         for k,v in compat.iteritems(sr_115):
@@ -658,7 +653,8 @@ class TestStata(tm.TestCase):
         df = DataFrame([[0.0]],columns=['float_'])
         with tm.ensure_clean() as path:
             df.to_stata(path)
-            valid_range = StataReader(path).VALID_RANGE
+            with StataReader(path) as rdr:
+                valid_range = rdr.VALID_RANGE
         expected_values = ['.' + chr(97 + i) for i in range(26)]
         expected_values.insert(0, '.')
         for t in types:
@@ -789,6 +785,14 @@ class TestStata(tm.TestCase):
                              columns=columns)
 
         tm.assert_frame_equal(expected, dropped)
+
+        # See PR 10757
+        columns = ['int_', 'long_', 'byte_']
+        expected = expected[columns]
+        reordered = read_stata(self.dta15_117, convert_dates=True,
+                               columns=columns)
+        tm.assert_frame_equal(expected, reordered)
+
         with tm.assertRaises(ValueError):
             columns = ['byte_', 'byte_']
             read_stata(self.dta15_117, convert_dates=True, columns=columns)
@@ -905,8 +909,8 @@ class TestStata(tm.TestCase):
         parsed_115 = read_stata(self.dta20_115)
         parsed_117 = read_stata(self.dta20_117)
         # Sort based on codes, not strings
-        parsed_115 = parsed_115.sort("srh")
-        parsed_117 = parsed_117.sort("srh")
+        parsed_115 = parsed_115.sort_values("srh")
+        parsed_117 = parsed_117.sort_values("srh")
         # Don't sort index
         parsed_115.index = np.arange(parsed_115.shape[0])
         parsed_117.index = np.arange(parsed_117.shape[0])

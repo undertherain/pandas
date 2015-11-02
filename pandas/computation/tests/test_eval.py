@@ -23,12 +23,13 @@ from pandas.computation.engines import _engines, NumExprClobberingError
 from pandas.computation.expr import PythonExprVisitor, PandasExprVisitor
 from pandas.computation.ops import (_binary_ops_dict,
                                     _special_case_arith_ops_syms,
-                                    _arith_ops_syms, _bool_ops_syms)
+                                    _arith_ops_syms, _bool_ops_syms,
+                                    _unary_math_ops, _binary_math_ops)
 
 import pandas.computation.expr as expr
 import pandas.util.testing as tm
 from pandas.util.testing import (assert_frame_equal, randbool,
-                                 assertRaisesRegexp,
+                                 assertRaisesRegexp, assert_numpy_array_equal,
                                  assert_produces_warning, assert_series_equal)
 from pandas.compat import PY3, u, reduce
 
@@ -607,6 +608,16 @@ class TestEvalNumexprPandas(tm.TestCase):
             pd.eval('+True', parser=self.parser, engine=self.engine), +True)
         self.assertEqual(
             pd.eval('+False', parser=self.parser, engine=self.engine), +False)
+
+    def test_unary_in_array(self):
+        # GH 11235
+        assert_numpy_array_equal(
+            pd.eval('[-True, True, ~True, +True,'
+                    '-False, False, ~False, +False,'
+                    '-37, 37, ~37, +37]'),
+            np.array([-True, True, ~True, +True,
+             -False, False, ~False, +False,
+             -37, 37, ~37, +37]))
 
     def test_disallow_scalar_bool_ops(self):
         exprs = '1 or 2', '1 and 2'
@@ -1255,6 +1266,13 @@ class TestOperationsNumExprPandas(tm.TestCase):
         expected['c'] = expected['a'] + expected['b']
         assert_frame_equal(df, expected)
 
+    def test_column_in(self):
+        # GH 11235
+        df = DataFrame({'a': [11], 'b': [-32]})
+        result = df.eval('a in [11, -32]')
+        expected = Series([True])
+        assert_series_equal(result, expected)
+
     def test_basic_period_index_boolean_expression(self):
         df = mkdf(2, 2, data_gen_f=f, c_idx_type='p', r_idx_type='i')
 
@@ -1437,6 +1455,129 @@ class TestOperationsPythonPandas(TestOperationsNumExprPandas):
         cls.engine = 'python'
         cls.parser = 'pandas'
         cls.arith_ops = expr._arith_ops_syms + expr._cmp_ops_syms
+
+
+class TestMathPythonPython(tm.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super(TestMathPythonPython, cls).setUpClass()
+        tm.skip_if_no_ne()
+        cls.engine = 'python'
+        cls.parser = 'pandas'
+        cls.unary_fns = _unary_math_ops
+        cls.binary_fns = _binary_math_ops
+
+    @classmethod
+    def tearDownClass(cls):
+        del cls.engine, cls.parser
+
+    def eval(self, *args, **kwargs):
+        kwargs['engine'] = self.engine
+        kwargs['parser'] = self.parser
+        kwargs['level'] = kwargs.pop('level', 0) + 1
+        return pd.eval(*args, **kwargs)
+
+    def test_unary_functions(self):
+        df = DataFrame({'a': np.random.randn(10)})
+        a = df.a
+        for fn in self.unary_fns:
+            expr = "{0}(a)".format(fn)
+            got = self.eval(expr)
+            expect = getattr(np, fn)(a)
+            pd.util.testing.assert_almost_equal(got, expect)
+
+    def test_binary_functions(self):
+        df = DataFrame({'a': np.random.randn(10),
+                        'b': np.random.randn(10)})
+        a = df.a
+        b = df.b
+        for fn in self.binary_fns:
+            expr = "{0}(a, b)".format(fn)
+            got = self.eval(expr)
+            expect = getattr(np, fn)(a, b)
+            np.testing.assert_allclose(got, expect)
+
+    def test_df_use_case(self):
+        df = DataFrame({'a': np.random.randn(10),
+                        'b': np.random.randn(10)})
+        df.eval("e = arctan2(sin(a), b)",
+                engine=self.engine,
+                parser=self.parser)
+        got = df.e
+        expect = np.arctan2(np.sin(df.a), df.b)
+        pd.util.testing.assert_almost_equal(got, expect)
+
+    def test_df_arithmetic_subexpression(self):
+        df = DataFrame({'a': np.random.randn(10),
+                        'b': np.random.randn(10)})
+        df.eval("e = sin(a + b)",
+                engine=self.engine,
+                parser=self.parser)
+        got = df.e
+        expect = np.sin(df.a + df.b)
+        pd.util.testing.assert_almost_equal(got, expect)
+
+    def check_result_type(self, dtype, expect_dtype):
+        df = DataFrame({'a': np.random.randn(10).astype(dtype)})
+        self.assertEqual(df.a.dtype, dtype)
+        df.eval("b = sin(a)",
+                engine=self.engine,
+                parser=self.parser)
+        got = df.b
+        expect = np.sin(df.a)
+        self.assertEqual(expect.dtype, got.dtype)
+        self.assertEqual(expect_dtype, got.dtype)
+        pd.util.testing.assert_almost_equal(got, expect)
+
+    def test_result_types(self):
+        self.check_result_type(np.int32, np.float64)
+        self.check_result_type(np.int64, np.float64)
+        self.check_result_type(np.float32, np.float32)
+        self.check_result_type(np.float64, np.float64)
+        # Did not test complex64 because DataFrame is converting it to
+        # complex128. Due to https://github.com/pydata/pandas/issues/10952
+        self.check_result_type(np.complex128, np.complex128)
+
+    def test_undefined_func(self):
+        df = DataFrame({'a': np.random.randn(10)})
+        with tm.assertRaisesRegexp(ValueError,
+                                   "\"mysin\" is not a supported function"):
+            df.eval("mysin(a)",
+                    engine=self.engine,
+                    parser=self.parser)
+
+    def test_keyword_arg(self):
+        df = DataFrame({'a': np.random.randn(10)})
+        with tm.assertRaisesRegexp(TypeError,
+                                   "Function \"sin\" does not support "
+                                   "keyword arguments"):
+            df.eval("sin(x=a)",
+                    engine=self.engine,
+                    parser=self.parser)
+
+
+class TestMathPythonPandas(TestMathPythonPython):
+    @classmethod
+    def setUpClass(cls):
+        super(TestMathPythonPandas, cls).setUpClass()
+        cls.engine = 'python'
+        cls.parser = 'pandas'
+
+
+class TestMathNumExprPandas(TestMathPythonPython):
+    @classmethod
+    def setUpClass(cls):
+        super(TestMathNumExprPandas, cls).setUpClass()
+        cls.engine = 'numexpr'
+        cls.parser = 'pandas'
+
+
+class TestMathNumExprPython(TestMathPythonPython):
+    @classmethod
+    def setUpClass(cls):
+        super(TestMathNumExprPython, cls).setUpClass()
+        cls.engine = 'numexpr'
+        cls.parser = 'python'
 
 
 _var_s = randn(10)

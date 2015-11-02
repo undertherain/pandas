@@ -197,20 +197,24 @@ or ``format``, use ``to_datetime`` if these are required.
 Invalid Data
 ~~~~~~~~~~~~
 
-Pass ``coerce=True`` to convert invalid data to ``NaT`` (not a time):
+.. note::
+
+   In version 0.17.0, the default for ``to_datetime`` is now ``errors='raise'``, rather than ``errors='ignore'``. This means
+   that invalid parsing will raise rather that return the original input as in previous versions.
+
+Pass ``errors='coerce'`` to convert invalid data to ``NaT`` (not a time):
 
 .. ipython:: python
+   :okexcept:
 
-   to_datetime(['2009-07-31', 'asd'])
+   # this is the default, raise when unparseable
+   to_datetime(['2009/07/31', 'asd'], errors='raise')
 
-   to_datetime(['2009-07-31', 'asd'], coerce=True)
+   # return the original input when unparseable
+   to_datetime(['2009/07/31', 'asd'], errors='ignore')
 
-
-Take care, ``to_datetime`` may not act as you expect on mixed data:
-
-.. ipython:: python
-
-   to_datetime([1, '1'])
+   # return NaT for input when unparseable
+   to_datetime(['2009/07/31', 'asd'], errors='coerce')
 
 Epoch Timestamps
 ~~~~~~~~~~~~~~~~
@@ -480,6 +484,7 @@ There are several time/date properties that one can access from ``Timestamp`` or
     dayofweek,"The day of the week with Monday=0, Sunday=6"
     weekday,"The day of the week with Monday=0, Sunday=6"
     quarter,"Quarter of the date: Jan=Mar = 1, Apr-Jun = 2, etc."
+    days_in_month,"The number of days in the month of the datetime"
     is_month_start,"Logical indicating if first day of month (defined by frequency)"
     is_month_end,"Logical indicating if last day of month (defined by frequency)"
     is_quarter_start,"Logical indicating if first day of quarter (defined by frequency)"
@@ -587,7 +592,7 @@ various docstrings for the classes.
 These operations (``apply``, ``rollforward`` and ``rollback``) preserves time (hour, minute, etc) information by default. To reset time, use ``normalize=True`` keyword when creating the offset instance. If ``normalize=True``, result is normalized after the function is applied.
 
 
-  .. ipython:: python
+.. ipython:: python
 
    day = Day()
    day.apply(Timestamp('2014-01-01 09:00'))
@@ -634,6 +639,46 @@ Another example is parameterizing ``YearEnd`` with the specific ending month:
 
    d + YearEnd()
    d + YearEnd(month=6)
+
+
+.. _timeseries.offsetseries:
+
+Using offsets with ``Series`` / ``DatetimeIndex``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Offsets can be used with either a ``Series`` or ``DatetimeIndex`` to
+apply the offset to each element.
+
+.. ipython:: python
+
+   rng = date_range('2012-01-01', '2012-01-03')
+   s = Series(rng)
+   rng
+   rng + DateOffset(months=2)
+   s + DateOffset(months=2)
+   s - DateOffset(months=2)
+
+If the offset class maps directly to a ``Timedelta`` (``Day``, ``Hour``,
+``Minute``, ``Second``, ``Micro``, ``Milli``, ``Nano``) it can be
+used exactly like a ``Timedelta`` - see the
+:ref:`Timedelta section<timedeltas.operations>` for more examples.
+
+.. ipython:: python
+
+   s - Day(2)
+   td = s - Series(date_range('2011-12-29', '2011-12-31'))
+   td
+   td + Minute(15)
+
+Note that some offsets (such as ``BQuarterEnd``) do not have a
+vectorized implementation.  They can still be used but may
+calculate signficantly slower and will raise a ``PerformanceWarning``
+
+.. ipython:: python
+   :okwarning:
+
+   rng + BQuarterEnd()
+
 
 .. _timeseries.alias:
 
@@ -838,10 +883,10 @@ frequencies. We will refer to these aliases as *offset aliases*
     "BAS", "business year start frequency"
     "BH", "business hour frequency"
     "H", "hourly frequency"
-    "T", "minutely frequency"
+    "T, min", "minutely frequency"
     "S", "secondly frequency"
-    "L", "milliseonds"
-    "U", "microseconds"
+    "L, ms", "milliseonds"
+    "U, us", "microseconds"
     "N", "nanoseconds"
 
 Combining Aliases
@@ -909,11 +954,12 @@ These can be used as arguments to ``date_range``, ``bdate_range``, constructors
 for ``DatetimeIndex``, as well as various other timeseries-related functions
 in pandas.
 
+.. _timeseries.legacyaliases:
+
 Legacy Aliases
 ~~~~~~~~~~~~~~
-Note that prior to v0.8.0, time rules had a slightly different look. pandas
-will continue to support the legacy time rules for the time being but it is
-strongly recommended that you switch to using the new offset aliases.
+Note that prior to v0.8.0, time rules had a slightly different look. These are
+deprecated in v0.17.0, and removed in future version.
 
 .. csv-table::
     :header: "Legacy Time Rule", "Offset Alias"
@@ -943,9 +989,7 @@ strongly recommended that you switch to using the new offset aliases.
     "A\@OCT", "BA\-OCT"
     "A\@NOV", "BA\-NOV"
     "A\@DEC", "BA\-DEC"
-    "min", "T"
-    "ms", "L"
-    "us", "U"
+
 
 As you can see, legacy quarterly and annual frequencies are business quarters
 and business year ends. Please also note the legacy time rule for milliseconds
@@ -1114,13 +1158,15 @@ Converting to Python datetimes
 
 .. _timeseries.resampling:
 
-Up- and downsampling
---------------------
+Resampling
+----------
 
-With 0.8, pandas introduces simple, powerful, and efficient functionality for
+Pandas has a simple, powerful, and efficient functionality for
 performing resampling operations during frequency conversion (e.g., converting
 secondly data into 5-minutely data). This is extremely common in, but not
 limited to, financial applications.
+
+``resample`` is a time-based groupby, followed by a reduction method on each of its groups.
 
 See some :ref:`cookbook examples <cookbook.resample>` for some advanced strategies
 
@@ -1160,19 +1206,6 @@ end of the interval is closed:
 
    ts.resample('5Min', closed='left')
 
-For upsampling, the ``fill_method`` and ``limit`` parameters can be specified
-to interpolate over the gaps that are created:
-
-.. ipython:: python
-
-   # from secondly to every 250 milliseconds
-
-   ts[:2].resample('250L')
-
-   ts[:2].resample('250L', fill_method='pad')
-
-   ts[:2].resample('250L', fill_method='pad', limit=2)
-
 Parameters like ``label`` and ``loffset`` are used to manipulate the resulting
 labels. ``label`` specifies whether the result is labeled with the beginning or
 the end of the interval. ``loffset`` performs a time adjustment on the output
@@ -1197,11 +1230,58 @@ retains the input representation.
 (detail below). It specifies how low frequency periods are converted to higher
 frequency periods.
 
-Note that 0.8 marks a watershed in the timeseries functionality in pandas. In
-previous versions, resampling had to be done using a combination of
-``date_range``, ``groupby`` with ``asof``, and then calling an aggregation
-function on the grouped object. This was not nearly as convenient or performant
-as the new pandas timeseries API.
+
+Up Sampling
+~~~~~~~~~~~
+
+For upsampling, the ``fill_method`` and ``limit`` parameters can be specified
+to interpolate over the gaps that are created:
+
+.. ipython:: python
+
+   # from secondly to every 250 milliseconds
+
+   ts[:2].resample('250L')
+
+   ts[:2].resample('250L', fill_method='pad')
+
+   ts[:2].resample('250L', fill_method='pad', limit=2)
+
+Sparse Resampling
+~~~~~~~~~~~~~~~~~
+
+Sparse timeseries are ones where you have a lot fewer points relative
+to the amount of time you are looking to resample. Naively upsampling a sparse series can potentially
+generate lots of intermediate values. When you don't want to use a method to fill these values, e.g. ``fill_method`` is ``None``,
+then intermediate values will be filled with ``NaN``.
+
+Since ``resample`` is a time-based groupby, the following is a method to efficiently
+resample only the groups that are not all ``NaN``
+
+.. ipython:: python
+
+    rng = date_range('2014-1-1', periods=100, freq='D') + Timedelta('1s')
+    ts = Series(range(100), index=rng)
+
+If we want to resample to the full range of the series
+
+.. ipython:: python
+
+    ts.resample('3T',how='sum')
+
+We can instead only resample those groups where we have points as follows:
+
+.. ipython:: python
+
+    from functools import partial
+    from pandas.tseries.frequencies import to_offset
+
+    def round(t, freq):
+        # round a Timestamp to a specified freq
+        freq = to_offset(freq)
+        return Timestamp((t.value // freq.delta.value) * freq.delta.value)
+
+    ts.groupby(partial(round, freq='3T')).sum()
 
 .. _timeseries.periods:
 
@@ -1214,8 +1294,10 @@ be created with the convenience function ``period_range``.
 
 Period
 ~~~~~~
+
 A ``Period`` represents a span of time (e.g., a day, a month, a quarter, etc).
-It can be created using a frequency alias:
+You can specify the span via ``freq`` keyword using a frequency alias like below.
+Because ``freq`` represents a span of ``Period``, it cannot be negative like "-3D".
 
 .. ipython:: python
 
@@ -1225,19 +1307,22 @@ It can be created using a frequency alias:
 
    Period('2012-1-1 19:00', freq='H')
 
-Unlike time stamped data, pandas does not support frequencies at multiples of
-DateOffsets (e.g., '3Min') for periods.
+   Period('2012-1-1 19:00', freq='5H')
 
 Adding and subtracting integers from periods shifts the period by its own
-frequency.
+frequency. Arithmetic is not allowed between ``Period`` with different ``freq`` (span).
 
 .. ipython:: python
 
    p = Period('2012', freq='A-DEC')
-
    p + 1
-
    p - 3
+   p = Period('2012-01', freq='2M')
+   p + 2
+   p - 1
+   @okexcept
+   p == Period('2012-01', freq='3M')
+
 
 If ``Period`` freq is daily or higher (``D``, ``H``, ``T``, ``S``, ``L``, ``U``, ``N``), ``offsets`` and ``timedelta``-like can be added if the result can have the same freq. Otherise, ``ValueError`` will be raised.
 
@@ -1291,6 +1376,13 @@ The ``PeriodIndex`` constructor can also be used directly:
 .. ipython:: python
 
    PeriodIndex(['2011-1', '2011-2', '2011-3'], freq='M')
+
+Passing multiplied frequency outputs a sequence of ``Period`` which
+has multiplied span.
+
+.. ipython:: python
+
+   PeriodIndex(start='2014-01', freq='3M', periods=4)
 
 Just like ``DatetimeIndex``, a ``PeriodIndex`` can also be used to index pandas
 objects:
@@ -1690,3 +1782,69 @@ constructor as well as ``tz_localize``.
 
    # tz_convert(None) is identical with tz_convert('UTC').tz_localize(None)
    didx.tz_convert('UCT').tz_localize(None)
+
+.. _timeseries.timezone_series:
+
+TZ aware Dtypes
+~~~~~~~~~~~~~~~
+
+.. versionadded:: 0.17.0
+
+``Series/DatetimeIndex`` with a timezone **naive** value are represented with a dtype of ``datetime64[ns]``.
+
+.. ipython:: python
+
+   s_naive = pd.Series(pd.date_range('20130101',periods=3))
+   s_naive
+
+``Series/DatetimeIndex`` with a timezone **aware** value are represented with a dtype of ``datetime64[ns, tz]``.
+
+.. ipython:: python
+
+   s_aware = pd.Series(pd.date_range('20130101',periods=3,tz='US/Eastern'))
+   s_aware
+
+Both of these ``Series`` can be manipulated via the ``.dt`` accessor, see :ref:`here <basics.dt_accessors>`.
+
+For example, to localize and convert a naive stamp to timezone aware.
+
+.. ipython:: python
+
+   s_naive.dt.tz_localize('UTC').dt.tz_convert('US/Eastern')
+
+
+Further more you can ``.astype(...)`` timezone aware (and naive). This operation is effectively a localize AND convert on a naive stamp, and
+a convert on an aware stamp.
+
+.. ipython:: python
+
+   # localize and convert a naive timezone
+   s_naive.astype('datetime64[ns, US/Eastern]')
+
+   # make an aware tz naive
+   s_aware.astype('datetime64[ns]')
+
+   # convert to a new timezone
+   s_aware.astype('datetime64[ns, CET]')
+
+.. note::
+
+   Using the ``.values`` accessor on a ``Series``, returns an numpy array of the data.
+   These values are converted to UTC, as numpy does not currently support timezones (even though it is *printing* in the local timezone!).
+
+   .. ipython:: python
+
+      s_naive.values
+      s_aware.values
+
+   Further note that once converted to a numpy array these would lose the tz tenor.
+
+   .. ipython:: python
+
+      Series(s_aware.values)
+
+   However, these can be easily converted
+
+   .. ipython:: python
+
+      pd.Series(s_aware.values).dt.tz_localize('UTC').dt.tz_convert('US/Eastern')

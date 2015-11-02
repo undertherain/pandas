@@ -30,7 +30,7 @@
 This is a short introduction to pandas, geared mainly for new users.
 You can see more complex recipes in the :ref:`Cookbook<cookbook>`
 
-Customarily, we import as follows
+Customarily, we import as follows:
 
 .. ipython:: python
 
@@ -157,7 +157,7 @@ Sorting by values
 
 .. ipython:: python
 
-   df.sort(columns='B')
+   df.sort_values(by='B')
 
 Selection
 ---------
@@ -169,7 +169,7 @@ Selection
    recommend the optimized pandas data access methods, ``.at``, ``.iat``,
    ``.loc``, ``.iloc`` and ``.ix``.
 
-See the indexing documentation :ref:`Indexing and Selecing Data <indexing>` and :ref:`MultiIndex / Advanced Indexing <advanced>`
+See the indexing documentation :ref:`Indexing and Selecting Data <indexing>` and :ref:`MultiIndex / Advanced Indexing <advanced>`
 
 Getting
 ~~~~~~~
@@ -680,7 +680,7 @@ Sorting is per order in the categories, not lexical order.
 
 .. ipython:: python
 
-    df.sort("grade")
+    df.sort_values(by="grade")
 
 Grouping by a categorical column shows also empty categories.
 

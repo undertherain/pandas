@@ -121,18 +121,6 @@ the specification are assumed to be ``:``. (e.g. ``p.loc['a']`` is equiv to
     DataFrame; ``df.loc[row_indexer,column_indexer]``
     Panel; ``p.loc[item_indexer,major_indexer,minor_indexer]``
 
-Deprecations
-------------
-
-Beginning with version 0.11.0, it's recommended that you transition away from
-the following methods as they *may* be deprecated in future versions.
-
-  - ``irow``
-  - ``icol``
-  - ``iget_value``
-
-See the section :ref:`Selection by Position <indexing.integer>` for substitutes.
-
 .. _indexing.basics:
 
 Basics
@@ -432,19 +420,13 @@ Select via integer list
 
    df1.iloc[[1,3,5],[1,3]]
 
-For slicing rows explicitly (equiv to deprecated ``df.irow(slice(1,3))``).
-
 .. ipython:: python
 
    df1.iloc[1:3,:]
 
-For slicing columns explicitly (equiv to deprecated ``df.icol(slice(1,3))``).
-
 .. ipython:: python
 
    df1.iloc[:,1:3]
-
-For getting a scalar via integer position (equiv to deprecated ``df.get_value(1,1)``)
 
 .. ipython:: python
 
@@ -1196,28 +1178,45 @@ takes as an argument the columns to use to identify duplicated rows.
 - ``drop_duplicates`` removes duplicate rows.
 
 By default, the first observed row of a duplicate set is considered unique, but
-each method has a ``take_last`` parameter that indicates the last observed row
-should be taken instead.
+each method has a ``keep`` parameter to specify targets to be kept.
+
+- ``keep='first'`` (default): mark / drop duplicates except for the first occurrence.
+- ``keep='last'``: mark / drop duplicates except for the last occurrence.
+- ``keep=False``: mark  / drop all duplicates.
 
 .. ipython:: python
 
-   df2 = pd.DataFrame({'a' : ['one', 'one', 'two', 'three', 'two', 'one', 'six'],
-                       'b' : ['x', 'y', 'y', 'x', 'y', 'x', 'x'],
-                       'c' : np.random.randn(7)})
-   df2.duplicated(['a','b'])
-   df2.drop_duplicates(['a','b'])
-   df2.drop_duplicates(['a','b'], take_last=True)
+   df2 = pd.DataFrame({'a': ['one', 'one', 'two', 'two', 'two', 'three', 'four'],
+                       'b': ['x', 'y', 'x', 'y', 'x', 'x', 'x'],
+                       'c': np.random.randn(7)})
+   df2
+   df2.duplicated('a')
+   df2.duplicated('a', keep='last')
+   df2.duplicated('a', keep=False)
+   df2.drop_duplicates('a')
+   df2.drop_duplicates('a', keep='last')
+   df2.drop_duplicates('a', keep=False)
 
-An alternative way to drop duplicates on the index is ``.groupby(level=0)`` combined with ``first()`` or ``last()``.
+Also, you can pass a list of columns to identify duplications.
 
 .. ipython:: python
 
-   df3 = df2.set_index('b')
+   df2.duplicated(['a', 'b'])
+   df2.drop_duplicates(['a', 'b'])
+
+To drop duplicates by index value, use ``Index.duplicated`` then perform slicing.
+Same options are available in ``keep`` parameter.
+
+.. ipython:: python
+
+   df3 = pd.DataFrame({'a': np.arange(6),
+                       'b': np.random.randn(6)},
+                      index=['a', 'a', 'b', 'c', 'b', 'a'])
    df3
-   df3.groupby(level=0).first()
-
-   # a bit more verbose
-   df3.reset_index().drop_duplicates(subset='b', take_last=False).set_index('b')
+   df3.index.duplicated()
+   df3[~df3.index.duplicated()]
+   df3[~df3.index.duplicated(keep='last')]
+   df3[~df3.index.duplicated(keep=False)]
 
 .. _indexing.dictionarylike:
 

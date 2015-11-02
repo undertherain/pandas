@@ -579,21 +579,21 @@ class TestPivotTable(tm.TestCase):
 
         exp_idx = Index(['a', 'b'], name='label')
         expected = DataFrame({7: [0, 3], 8: [1, 4], 9:[2, 5]},
-                             index=exp_idx, columns=[7, 8, 9])
+                             index=exp_idx, columns=Index([7, 8, 9],name='dt1'))
         tm.assert_frame_equal(result, expected)
 
         result = pivot_table(df, index=df['dt2'].dt.month, columns=df['dt1'].dt.hour,
                              values='value1')
 
         expected = DataFrame({7: [0, 3], 8: [1, 4], 9:[2, 5]},
-                             index=[1, 2], columns=[7, 8, 9])
+                             index=Index([1, 2],name='dt2'), columns=Index([7, 8, 9],name='dt1'))
         tm.assert_frame_equal(result, expected)
 
-        result = pivot_table(df, index=df['dt2'].dt.year,
+        result = pivot_table(df, index=df['dt2'].dt.year.values,
                              columns=[df['dt1'].dt.hour, df['dt2'].dt.month],
                              values='value1')
 
-        exp_col = MultiIndex.from_arrays([[7, 7, 8, 8, 9, 9], [1, 2] * 3])
+        exp_col = MultiIndex.from_arrays([[7, 7, 8, 8, 9, 9], [1, 2] * 3],names=['dt1','dt2'])
         expected = DataFrame(np.array([[0, 3, 1, 4, 2, 5]],dtype='int64'),
                              index=[2013], columns=exp_col)
         tm.assert_frame_equal(result, expected)
@@ -718,6 +718,26 @@ class TestCrosstab(tm.TestCase):
         m = MultiIndex.from_tuples([('one', 'dull'), ('one', 'shiny'),
                                     ('two', 'dull'), ('two', 'shiny')])
         assert_equal(res.columns.values, m.values)
+
+    def test_categorical_margins(self):
+        # GH 10989
+        df = pd.DataFrame({'x': np.arange(8),
+                           'y': np.arange(8) // 4,
+                           'z': np.arange(8) % 2})
+
+        expected = pd.DataFrame([[1.0, 2.0, 1.5],[5, 6, 5.5],[3, 4, 3.5]])
+        expected.index = Index([0,1,'All'],name='y')
+        expected.columns = Index([0,1,'All'],name='z')
+
+        data = df.copy()
+        table = data.pivot_table('x', 'y', 'z', margins=True)
+        tm.assert_frame_equal(table, expected)
+
+        data = df.copy()
+        data.y = data.y.astype('category')
+        data.z = data.z.astype('category')
+        table = data.pivot_table('x', 'y', 'z', margins=True)
+        tm.assert_frame_equal(table, expected)
 
 if __name__ == '__main__':
     import nose

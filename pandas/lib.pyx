@@ -269,6 +269,18 @@ cpdef checknull_old(object val):
     else:
         return util._checknull(val)
 
+cpdef isposinf_scalar(object val):
+    if util.is_float_object(val) and val == INF:
+        return True
+    else:
+        return False
+
+cpdef isneginf_scalar(object val):
+    if util.is_float_object(val) and val == NEGINF:
+        return True
+    else:
+        return False
+
 def isscalar(object val):
     """
     Return True if given value is scalar.
@@ -633,17 +645,42 @@ def convert_timestamps(ndarray values):
 
     return out
 
-def maybe_indices_to_slice(ndarray[int64_t] indices):
+
+def maybe_indices_to_slice(ndarray[int64_t] indices, int max_len):
     cdef:
         Py_ssize_t i, n = len(indices)
+        int k, vstart, vlast, v
 
-    if not n or indices[0] < 0:
+    if n == 0:
+        return slice(0, 0)
+
+    vstart = indices[0]
+    if vstart < 0 or max_len <= vstart:
         return indices
 
-    for i in range(1, n):
-        if indices[i] - indices[i - 1] != 1:
-            return indices
-    return slice(indices[0], indices[n - 1] + 1)
+    if n == 1:
+        return slice(vstart, vstart + 1)
+
+    vlast = indices[n - 1]
+    if vlast < 0 or max_len <= vlast:
+        return indices
+
+    k = indices[1] - indices[0]
+    if k == 0:
+        return indices
+    else:
+        for i in range(2, n):
+            v = indices[i]
+            if v - indices[i - 1] != k:
+                return indices
+
+        if k > 0:
+            return slice(vstart, vlast + 1, k)
+        else:
+            if vlast == 0:
+                return slice(vstart, None, k)
+            else:
+                return slice(vstart, vlast - 1, k)
 
 
 def maybe_booleans_to_slice(ndarray[uint8_t] mask):
@@ -1228,36 +1265,32 @@ def lookup_values(ndarray[object] values, dict mapping):
     return maybe_convert_objects(result)
 
 
-def count_level_1d(ndarray[uint8_t, cast=True] mask,
-                   ndarray[int64_t] labels, Py_ssize_t max_bin):
-    cdef:
-        Py_ssize_t i, n
-        ndarray[int64_t] counts
-
-    counts = np.zeros(max_bin, dtype='i8')
-
-    n = len(mask)
-
-    for i from 0 <= i < n:
-        if mask[i]:
-            counts[labels[i]] += 1
-
-    return counts
-
-
+@cython.boundscheck(False)
+@cython.wraparound(False)
 def count_level_2d(ndarray[uint8_t, ndim=2, cast=True] mask,
-                   ndarray[int64_t] labels, Py_ssize_t max_bin):
+                   ndarray[int64_t, ndim=1] labels,
+                   Py_ssize_t max_bin,
+                   int axis):
     cdef:
         Py_ssize_t i, j, k, n
         ndarray[int64_t, ndim=2] counts
 
+    assert(axis == 0 or axis == 1)
     n, k = (<object> mask).shape
-    counts = np.zeros((max_bin, k), dtype='i8')
 
-    for i from 0 <= i < n:
-        for j from 0 <= j < k:
-            if mask[i, j]:
-                counts[labels[i], j] += 1
+    if axis == 0:
+        counts = np.zeros((max_bin, k), dtype='i8')
+        with nogil:
+            for i from 0 <= i < n:
+                for j from 0 <= j < k:
+                    counts[labels[i], j] += mask[i, j]
+
+    else:  # axis == 1
+        counts = np.zeros((n, max_bin), dtype='i8')
+        with nogil:
+            for i from 0 <= i < n:
+                for j from 0 <= j < k:
+                    counts[i, labels[j]] += mask[i, j]
 
     return counts
 
@@ -1323,34 +1356,46 @@ def fast_zip_fillna(list ndarrays, fill_value=pandas_null):
 
     return result
 
-def duplicated(ndarray[object] values, take_last=False):
+
+def duplicated(ndarray[object] values, object keep='first'):
     cdef:
         Py_ssize_t i, n
-        set seen = set()
+        dict seen = dict()
         object row
 
     n = len(values)
     cdef ndarray[uint8_t] result = np.zeros(n, dtype=np.uint8)
 
-    if take_last:
+    if keep == 'last':
         for i from n > i >= 0:
             row = values[i]
-
             if row in seen:
                 result[i] = 1
             else:
-                seen.add(row)
+                seen[row] = i
                 result[i] = 0
-    else:
+    elif keep == 'first':
         for i from 0 <= i < n:
             row = values[i]
             if row in seen:
                 result[i] = 1
             else:
-                seen.add(row)
+                seen[row] = i
                 result[i] = 0
+    elif keep is False:
+        for i from 0 <= i < n:
+            row = values[i]
+            if row in seen:
+                result[i] = 1
+                result[seen[row]] = 1
+            else:
+                seen[row] = i
+                result[i] = 0
+    else:
+        raise ValueError('keep must be either "first", "last" or False')
 
     return result.view(np.bool_)
+
 
 def generate_slices(ndarray[int64_t] labels, Py_ssize_t ngroups):
     cdef:
@@ -1695,7 +1740,7 @@ cdef class BlockPlacement:
             self._as_array = arr
             self._has_array = True
 
-    def __unicode__(self):
+    def __str__(self):
         cdef slice s = self._ensure_has_slice()
         if s is not None:
             v = self._as_slice
@@ -1703,6 +1748,8 @@ cdef class BlockPlacement:
             v = self._as_array
 
         return '%s(%r)' % (self.__class__.__name__, v)
+
+    __repr__ = __str__
 
     def __len__(self):
         cdef slice s = self._ensure_has_slice()

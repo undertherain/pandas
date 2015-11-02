@@ -2293,6 +2293,13 @@ MyColumn
         result = self.read_csv(StringIO(data), header=None)
         self.assertEqual(len(result), 2)
 
+        # GH 9735
+        chunk1 = 'a' * (1024 * 256 - 2) + '\na'
+        chunk2 = '\n a'
+        result = pd.read_csv(StringIO(chunk1 + chunk2), header=None)
+        expected = pd.DataFrame(['a' * (1024 * 256 - 2), 'a', ' a'])
+        tm.assert_frame_equal(result, expected)
+
     def test_empty_with_index(self):
         # GH 10184
         data = 'x,y'
@@ -2414,6 +2421,94 @@ MyColumn
             result = pd.read_csv(StringIO(str(x)), header=None)
             expected = pd.DataFrame([str(x)])
             tm.assert_frame_equal(result, expected)
+
+    def test_empty_with_nrows_chunksize(self):
+        # GH 9535
+        expected = pd.DataFrame([], columns=['foo', 'bar'])
+
+        result = self.read_csv(StringIO('foo,bar\n'), nrows=10)
+        tm.assert_frame_equal(result, expected)
+
+        result = next(iter(pd.read_csv(StringIO('foo,bar\n'), chunksize=10)))
+        tm.assert_frame_equal(result, expected)
+
+        result = pd.read_csv(StringIO('foo,bar\n'), nrows=10, as_recarray=True)
+        result = pd.DataFrame(result[2], columns=result[1], index=result[0])
+        tm.assert_frame_equal(pd.DataFrame.from_records(result), expected)
+
+        result = next(iter(pd.read_csv(StringIO('foo,bar\n'), chunksize=10, as_recarray=True)))
+        result = pd.DataFrame(result[2], columns=result[1], index=result[0])
+        tm.assert_frame_equal(pd.DataFrame.from_records(result), expected)
+
+    def test_eof_states(self):
+        # GH 10728 and 10548
+
+        ## With skip_blank_lines = True
+        expected = pd.DataFrame([[4, 5, 6]], columns=['a', 'b', 'c'])
+
+        # GH 10728
+        # WHITESPACE_LINE
+        data = 'a,b,c\n4,5,6\n '
+        result = self.read_csv(StringIO(data))
+        tm.assert_frame_equal(result, expected)
+
+        # GH 10548
+        # EAT_LINE_COMMENT
+        data = 'a,b,c\n4,5,6\n#comment'
+        result = self.read_csv(StringIO(data), comment='#')
+        tm.assert_frame_equal(result, expected)
+
+        # EAT_CRNL_NOP
+        data = 'a,b,c\n4,5,6\n\r'
+        result = self.read_csv(StringIO(data))
+        tm.assert_frame_equal(result, expected)
+
+        # EAT_COMMENT
+        data = 'a,b,c\n4,5,6#comment'
+        result = self.read_csv(StringIO(data), comment='#')
+        tm.assert_frame_equal(result, expected)
+
+        # SKIP_LINE
+        data = 'a,b,c\n4,5,6\nskipme'
+        result = self.read_csv(StringIO(data), skiprows=[2])
+        tm.assert_frame_equal(result, expected)
+
+        ## With skip_blank_lines = False
+
+        # EAT_LINE_COMMENT
+        data = 'a,b,c\n4,5,6\n#comment'
+        result = self.read_csv(StringIO(data), comment='#', skip_blank_lines=False)
+        expected = pd.DataFrame([[4, 5, 6]], columns=['a', 'b', 'c'])
+        tm.assert_frame_equal(result, expected)
+
+        # IN_FIELD
+        data = 'a,b,c\n4,5,6\n '
+        result = self.read_csv(StringIO(data), skip_blank_lines=False)
+        expected = pd.DataFrame([['4', 5, 6], [' ', None, None]], columns=['a', 'b', 'c'])
+        tm.assert_frame_equal(result, expected)
+
+        # EAT_CRNL
+        data = 'a,b,c\n4,5,6\n\r'
+        result = self.read_csv(StringIO(data), skip_blank_lines=False)
+        expected = pd.DataFrame([[4, 5, 6], [None, None, None]], columns=['a', 'b', 'c'])
+        tm.assert_frame_equal(result, expected)
+
+        ## Should produce exceptions
+
+        # ESCAPED_CHAR
+        data = "a,b,c\n4,5,6\n\\"
+        self.assertRaises(Exception, self.read_csv, StringIO(data), escapechar='\\')
+
+        # ESCAPE_IN_QUOTED_FIELD
+        data = 'a,b,c\n4,5,6\n"\\'
+        self.assertRaises(Exception, self.read_csv, StringIO(data), escapechar='\\')
+
+        # IN_QUOTED_FIELD
+        # Python 2.6 won't throw an exception for this case (see http://bugs.python.org/issue16013)
+        tm._skip_if_python26()
+        data = 'a,b,c\n4,5,6\n"'
+        self.assertRaises(Exception, self.read_csv, StringIO(data), escapechar='\\')
+
 
 
 class TestPythonParser(ParserTests, tm.TestCase):
@@ -3748,6 +3843,14 @@ one,two
             self.assertRaises(ValueError, self.read_csv,
                               path, compression='bz3')
 
+            with open(path, 'rb') as fin:
+                if compat.PY3:
+                    result = self.read_csv(fin, compression='bz2')
+                    tm.assert_frame_equal(result, expected)
+                else:
+                    self.assertRaises(ValueError, self.read_csv,
+                                      fin, compression='bz2')
+
     def test_decompression_regex_sep(self):
         try:
             import gzip
@@ -4014,6 +4117,22 @@ MyColumn
                                skipinitialspace=True)
         tm.assert_frame_equal(result, expected)
 
+    def test_bool_header_arg(self):
+        # GH 6114
+        data = """\
+MyColumn
+   a
+   b
+   a
+   b"""
+        for arg in [True, False]:
+            with tm.assertRaises(TypeError):
+                pd.read_csv(StringIO(data), header=arg)
+            with tm.assertRaises(TypeError):
+                pd.read_table(StringIO(data), header=arg)
+            with tm.assertRaises(TypeError):
+                pd.read_fwf(StringIO(data), header=arg)
+
 class TestMiscellaneous(tm.TestCase):
 
     # for tests that don't fit into any of the other classes, e.g. those that
@@ -4145,17 +4264,123 @@ class TestS3(tm.TestCase):
 
     @tm.network
     def test_parse_public_s3_bucket(self):
-        import nose.tools as nt
-        df = pd.read_csv('s3://nyqpug/tips.csv')
-        nt.assert_true(isinstance(df, pd.DataFrame))
-        nt.assert_false(df.empty)
-        tm.assert_frame_equal(pd.read_csv(tm.get_data_path('tips.csv')), df)
+        for ext, comp in [('', None), ('.gz', 'gzip'), ('.bz2', 'bz2')]:
+            if comp == 'bz2' and compat.PY2:
+                # The Python 2 C parser can't read bz2 from S3.
+                self.assertRaises(ValueError, pd.read_csv,
+                                  's3://pandas-test/tips.csv' + ext,
+                                  compression=comp)
+            else:
+                df = pd.read_csv('s3://pandas-test/tips.csv' + ext, compression=comp)
+                self.assertTrue(isinstance(df, pd.DataFrame))
+                self.assertFalse(df.empty)
+                tm.assert_frame_equal(pd.read_csv(tm.get_data_path('tips.csv')), df)
 
         # Read public file from bucket with not-public contents
         df = pd.read_csv('s3://cant_get_it/tips.csv')
-        nt.assert_true(isinstance(df, pd.DataFrame))
-        nt.assert_false(df.empty)
+        self.assertTrue(isinstance(df, pd.DataFrame))
+        self.assertFalse(df.empty)
         tm.assert_frame_equal(pd.read_csv(tm.get_data_path('tips.csv')), df)
+
+    @tm.network
+    def test_parse_public_s3n_bucket(self):
+        # Read from AWS s3 as "s3n" URL
+        df = pd.read_csv('s3n://pandas-test/tips.csv', nrows=10)
+        self.assertTrue(isinstance(df, pd.DataFrame))
+        self.assertFalse(df.empty)
+        tm.assert_frame_equal(pd.read_csv(tm.get_data_path('tips.csv')).iloc[:10], df)
+
+    @tm.network
+    def test_parse_public_s3a_bucket(self):
+        # Read from AWS s3 as "s3a" URL
+        df = pd.read_csv('s3a://pandas-test/tips.csv', nrows=10)
+        self.assertTrue(isinstance(df, pd.DataFrame))
+        self.assertFalse(df.empty)
+        tm.assert_frame_equal(pd.read_csv(tm.get_data_path('tips.csv')).iloc[:10], df)
+
+    @tm.network
+    def test_parse_public_s3_bucket_nrows(self):
+        for ext, comp in [('', None), ('.gz', 'gzip'), ('.bz2', 'bz2')]:
+            if comp == 'bz2' and compat.PY2:
+                # The Python 2 C parser can't read bz2 from S3.
+                self.assertRaises(ValueError, pd.read_csv,
+                                  's3://pandas-test/tips.csv' + ext,
+                                  compression=comp)
+            else:
+                df = pd.read_csv('s3://pandas-test/tips.csv' + ext, nrows=10, compression=comp)
+                self.assertTrue(isinstance(df, pd.DataFrame))
+                self.assertFalse(df.empty)
+                tm.assert_frame_equal(pd.read_csv(tm.get_data_path('tips.csv')).iloc[:10], df)
+
+    @tm.network
+    def test_parse_public_s3_bucket_chunked(self):
+        # Read with a chunksize
+        chunksize = 5
+        local_tips = pd.read_csv(tm.get_data_path('tips.csv'))
+        for ext, comp in [('', None), ('.gz', 'gzip'), ('.bz2', 'bz2')]:
+            if comp == 'bz2' and compat.PY2:
+                # The Python 2 C parser can't read bz2 from S3.
+                self.assertRaises(ValueError, pd.read_csv,
+                                  's3://pandas-test/tips.csv' + ext,
+                                  compression=comp)
+            else:
+                df_reader = pd.read_csv('s3://pandas-test/tips.csv' + ext,
+                                        chunksize=chunksize, compression=comp)
+                self.assertEqual(df_reader.chunksize, chunksize)
+                for i_chunk in [0, 1, 2]:
+                    # Read a couple of chunks and make sure we see them properly.
+                    df = df_reader.get_chunk()
+                    self.assertTrue(isinstance(df, pd.DataFrame))
+                    self.assertFalse(df.empty)
+                    true_df = local_tips.iloc[chunksize * i_chunk: chunksize * (i_chunk + 1)]
+                    true_df = true_df.reset_index().drop('index', axis=1)  # Chunking doesn't preserve row numbering
+                    tm.assert_frame_equal(true_df, df)
+
+    @tm.network
+    def test_parse_public_s3_bucket_chunked_python(self):
+        # Read with a chunksize using the Python parser
+        chunksize = 5
+        local_tips = pd.read_csv(tm.get_data_path('tips.csv'))
+        for ext, comp in [('', None), ('.gz', 'gzip'), ('.bz2', 'bz2')]:
+            df_reader = pd.read_csv('s3://pandas-test/tips.csv' + ext,
+                                    chunksize=chunksize, compression=comp,
+                                    engine='python')
+            self.assertEqual(df_reader.chunksize, chunksize)
+            for i_chunk in [0, 1, 2]:
+                # Read a couple of chunks and make sure we see them properly.
+                df = df_reader.get_chunk()
+                self.assertTrue(isinstance(df, pd.DataFrame))
+                self.assertFalse(df.empty)
+                true_df = local_tips.iloc[chunksize * i_chunk: chunksize * (i_chunk + 1)]
+                true_df = true_df.reset_index().drop('index', axis=1)  # Chunking doesn't preserve row numbering
+                tm.assert_frame_equal(true_df, df)
+
+    @tm.network
+    def test_parse_public_s3_bucket_python(self):
+        for ext, comp in [('', None), ('.gz', 'gzip'), ('.bz2', 'bz2')]:
+            df = pd.read_csv('s3://pandas-test/tips.csv' + ext, engine='python',
+                             compression=comp)
+            self.assertTrue(isinstance(df, pd.DataFrame))
+            self.assertFalse(df.empty)
+            tm.assert_frame_equal(pd.read_csv(tm.get_data_path('tips.csv')), df)
+
+    @tm.network
+    def test_infer_s3_compression(self):
+        for ext in ['', '.gz', '.bz2']:
+            df = pd.read_csv('s3://pandas-test/tips.csv' + ext,
+                             engine='python', compression='infer')
+            self.assertTrue(isinstance(df, pd.DataFrame))
+            self.assertFalse(df.empty)
+            tm.assert_frame_equal(pd.read_csv(tm.get_data_path('tips.csv')), df)
+
+    @tm.network
+    def test_parse_public_s3_bucket_nrows_python(self):
+        for ext, comp in [('', None), ('.gz', 'gzip'), ('.bz2', 'bz2')]:
+            df = pd.read_csv('s3://pandas-test/tips.csv' + ext, engine='python',
+                             nrows=10, compression=comp)
+            self.assertTrue(isinstance(df, pd.DataFrame))
+            self.assertFalse(df.empty)
+            tm.assert_frame_equal(pd.read_csv(tm.get_data_path('tips.csv')).iloc[:10], df)
 
     @tm.network
     def test_s3_fails(self):

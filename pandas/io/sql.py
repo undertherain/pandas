@@ -18,6 +18,7 @@ from pandas.compat import lzip, map, zip, raise_with_traceback, string_types
 from pandas.core.api import DataFrame, Series
 from pandas.core.common import isnull
 from pandas.core.base import PandasObject
+from pandas.core.dtypes import DatetimeTZDtype
 from pandas.tseries.tools import to_datetime
 from pandas.util.decorators import Appender
 
@@ -80,17 +81,21 @@ def _convert_params(sql, params):
 
 def _handle_date_column(col, format=None):
     if isinstance(format, dict):
-        return to_datetime(col, **format)
+        return to_datetime(col, errors='ignore', **format)
     else:
         if format in ['D', 's', 'ms', 'us', 'ns']:
-            return to_datetime(col, coerce=True, unit=format, utc=True)
+            return to_datetime(col, errors='coerce', unit=format, utc=True)
         elif (issubclass(col.dtype.type, np.floating)
                 or issubclass(col.dtype.type, np.integer)):
             # parse dates as timestamp
             format = 's' if format is None else format
-            return to_datetime(col, coerce=True, unit=format, utc=True)
+            return to_datetime(col, errors='coerce', unit=format, utc=True)
+        elif com.is_datetime64tz_dtype(col):
+            # coerce to UTC timezone
+            # GH11216
+            return to_datetime(col,errors='coerce').astype('datetime64[ns, UTC]')
         else:
-            return to_datetime(col, coerce=True, format=format, utc=True)
+            return to_datetime(col, errors='coerce', format=format, utc=True)
 
 
 def _parse_date_columns(data_frame, parse_dates):
@@ -112,6 +117,14 @@ def _parse_date_columns(data_frame, parse_dates):
         except TypeError:
             fmt = None
         data_frame[col_name] = _handle_date_column(df_col, format=fmt)
+
+
+    # we want to coerce datetime64_tz dtypes for now
+    # we could in theory do a 'nice' conversion from a FixedOffset tz
+    # GH11216
+    for col_name, df_col in data_frame.iteritems():
+        if com.is_datetime64tz_dtype(df_col):
+            data_frame[col_name] = _handle_date_column(df_col)
 
     return data_frame
 
@@ -143,8 +156,8 @@ def execute(sql, con, cur=None, params=None):
         Using SQLAlchemy makes it possible to use any DB supported by that
         library.
         If a DBAPI2 object, only sqlite3 is supported.
-    cur : deprecated, cursor is obtained from connection
-    params : list or tuple, optional
+    cur : deprecated, cursor is obtained from connection, default: None
+    params : list or tuple, optional, default: None
         List of parameters to pass to execute method.
 
     Returns
@@ -189,8 +202,9 @@ def tquery(sql, con=None, cur=None, retry=True):
     ----------
     sql: string
         SQL query to be executed
-    con: DBAPI2 connection
-    cur: deprecated, cursor is obtained from connection
+    con: DBAPI2 connection, default: None
+    cur: deprecated, cursor is obtained from connection, default: None
+    retry: boolean value to specify whether to retry after failure, default: True
 
     Returns
     -------
@@ -200,7 +214,7 @@ def tquery(sql, con=None, cur=None, retry=True):
     warnings.warn(
         "tquery is deprecated, and will be removed in future versions. "
         "You can use ``execute(...).fetchall()`` instead.",
-        FutureWarning)
+        FutureWarning, stacklevel=2)
 
     cur = execute(sql, con, cur=cur)
     result = _safe_fetch(cur)
@@ -242,9 +256,10 @@ def uquery(sql, con=None, cur=None, retry=True, params=None):
     ----------
     sql: string
         SQL query to be executed
-    con: DBAPI2 connection
-    cur: deprecated, cursor is obtained from connection
-    params: list or tuple, optional
+    con: DBAPI2 connection, default: None
+    cur: deprecated, cursor is obtained from connection, default: None
+    retry: boolean value to specify whether to retry after failure, default: True
+    params: list or tuple, optional, default: None
         List of parameters to pass to execute method.
 
     Returns
@@ -255,7 +270,7 @@ def uquery(sql, con=None, cur=None, retry=True, params=None):
     warnings.warn(
         "uquery is deprecated, and will be removed in future versions. "
         "You can use ``execute(...).rowcount`` instead.",
-        FutureWarning)
+        FutureWarning, stacklevel=2)
 
     cur = execute(sql, con, cur=cur, params=params)
 
@@ -294,12 +309,12 @@ def read_sql_table(table_name, con, schema=None, index_col=None,
     schema : string, default None
         Name of SQL schema in database to query (if database flavor
         supports this). If None, use default schema (default).
-    index_col : string, optional
-        Column to set as index
+    index_col : string or list of strings, optional, default: None
+        Column(s) to set as index(MultiIndex)
     coerce_float : boolean, default True
         Attempt to convert values to non-string, non-numeric objects (like
         decimal.Decimal) to floating point. Can result in loss of Precision.
-    parse_dates : list or dict
+    parse_dates : list or dict, default: None
         - List of column names to parse as dates
         - Dict of ``{column_name: format string}`` where format string is
           strftime compatible in case of parsing string times or is one of
@@ -308,7 +323,7 @@ def read_sql_table(table_name, con, schema=None, index_col=None,
           to the keyword arguments of :func:`pandas.to_datetime`
           Especially useful with databases without native Datetime support,
           such as SQLite
-    columns : list
+    columns : list, default: None
         List of column names to select from sql table
     chunksize : int, default None
         If specified, return an iterator where `chunksize` is the number of
@@ -328,7 +343,7 @@ def read_sql_table(table_name, con, schema=None, index_col=None,
     read_sql
 
     """
-    
+
     con = _engine_builder(con)
     if not _is_sqlalchemy_connectable(con):
         raise NotImplementedError("read_sql_table only supported for "
@@ -337,7 +352,7 @@ def read_sql_table(table_name, con, schema=None, index_col=None,
     from sqlalchemy.schema import MetaData
     meta = MetaData(con, schema=schema)
     try:
-        meta.reflect(only=[table_name])
+        meta.reflect(only=[table_name], views=True)
     except sqlalchemy.exc.InvalidRequestError:
         raise ValueError("Table %s not found" % table_name)
 
@@ -362,25 +377,25 @@ def read_sql_query(sql, con, index_col=None, coerce_float=True, params=None,
 
     Parameters
     ----------
-    sql : string
-        SQL query to be executed
-    con : SQLAlchemy connectable(engine/connection) or database string URI 
+    sql : string SQL query or SQLAlchemy Selectable (select or text object)
+        to be executed.
+    con : SQLAlchemy connectable(engine/connection) or database string URI
         or sqlite3 DBAPI2 connection
         Using SQLAlchemy makes it possible to use any DB supported by that
         library.
         If a DBAPI2 object, only sqlite3 is supported.
-    index_col : string, optional
-        Column name to use as index for the returned DataFrame object.
+    index_col : string or list of strings, optional, default: None
+        Column(s) to set as index(MultiIndex)
     coerce_float : boolean, default True
         Attempt to convert values to non-string, non-numeric objects (like
         decimal.Decimal) to floating point, useful for SQL result sets
-    params : list, tuple or dict, optional
+    params : list, tuple or dict, optional, default: None
         List of parameters to pass to execute method.  The syntax used
         to pass parameters is database driver dependent. Check your
         database driver documentation for which of the five syntax styles,
         described in PEP 249's paramstyle, is supported.
         Eg. for psycopg2, uses %(name)s so use params={'name' : 'value'}
-    parse_dates : list or dict
+    parse_dates : list or dict, default: None
         - List of column names to parse as dates
         - Dict of ``{column_name: format string}`` where format string is
           strftime compatible in case of parsing string times or is one of
@@ -421,25 +436,25 @@ def read_sql(sql, con, index_col=None, coerce_float=True, params=None,
 
     Parameters
     ----------
-    sql : string
-        SQL query to be executed or database table name.
+    sql : string SQL query or SQLAlchemy Selectable (select or text object)
+        to be executed, or database table name.
     con : SQLAlchemy connectable(engine/connection) or database string URI
         or DBAPI2 connection (fallback mode)
         Using SQLAlchemy makes it possible to use any DB supported by that
         library.
         If a DBAPI2 object, only sqlite3 is supported.
-    index_col : string, optional
-        column name to use as index for the returned DataFrame object.
+    index_col : string or list of strings, optional, default: None
+        Column(s) to set as index(MultiIndex)
     coerce_float : boolean, default True
         Attempt to convert values to non-string, non-numeric objects (like
         decimal.Decimal) to floating point, useful for SQL result sets
-    params : list, tuple or dict, optional
+    params : list, tuple or dict, optional, default: None
         List of parameters to pass to execute method.  The syntax used
         to pass parameters is database driver dependent. Check your
         database driver documentation for which of the five syntax styles,
         described in PEP 249's paramstyle, is supported.
         Eg. for psycopg2, uses %(name)s so use params={'name' : 'value'}
-    parse_dates : list or dict
+    parse_dates : list or dict, default: None
         - List of column names to parse as dates
         - Dict of ``{column_name: format string}`` where format string is
           strftime compatible in case of parsing string times or is one of
@@ -448,7 +463,7 @@ def read_sql(sql, con, index_col=None, coerce_float=True, params=None,
           to the keyword arguments of :func:`pandas.to_datetime`
           Especially useful with databases without native Datetime support,
           such as SQLite
-    columns : list
+    columns : list, default: None
         List of column names to select from sql table (only used when reading
         a table).
     chunksize : int, default None
@@ -618,7 +633,7 @@ def pandasSQL_builder(con, flavor=None, schema=None, meta=None,
         return SQLDatabase(con, schema=schema, meta=meta)
     else:
         if flavor == 'mysql':
-            warnings.warn(_MYSQL_WARNING, FutureWarning)
+            warnings.warn(_MYSQL_WARNING, FutureWarning, stacklevel=3)
         return SQLiteDatabase(con, flavor, is_cursor=is_cursor)
 
 
@@ -896,11 +911,10 @@ class SQLTable(PandasObject):
             try:
                 df_col = self.frame[col_name]
                 # the type the dataframe column should have
-                col_type = self._numpy_type(sql_col.type)
+                col_type = self._get_dtype(sql_col.type)
 
-                if col_type is datetime or col_type is date:
-                    if not issubclass(df_col.dtype.type, np.datetime64):
-                        self.frame[col_name] = _handle_date_column(df_col)
+                if col_type is datetime or col_type is date or col_type is DatetimeTZDtype:
+                    self.frame[col_name] = _handle_date_column(df_col)
 
                 elif col_type is float:
                     # floats support NA, can always convert!
@@ -957,7 +971,7 @@ class SQLTable(PandasObject):
         if col_type == 'timedelta64':
             warnings.warn("the 'timedelta' type is not supported, and will be "
                           "written as integer values (ns frequency) to the "
-                          "database.", UserWarning)
+                          "database.", UserWarning, stacklevel=8)
             return BigInteger
         elif col_type == 'floating':
             if col.dtype == 'float32':
@@ -980,20 +994,25 @@ class SQLTable(PandasObject):
 
         return Text
 
-    def _numpy_type(self, sqltype):
-        from sqlalchemy.types import Integer, Float, Boolean, DateTime, Date
+    def _get_dtype(self, sqltype):
+        from sqlalchemy.types import Integer, Float, Boolean, DateTime, Date, TIMESTAMP
 
         if isinstance(sqltype, Float):
             return float
-        if isinstance(sqltype, Integer):
+        elif isinstance(sqltype, Integer):
             # TODO: Refine integer size.
             return np.dtype('int64')
-        if isinstance(sqltype, DateTime):
+        elif isinstance(sqltype, TIMESTAMP):
+            # we have a timezone capable type
+            if not sqltype.timezone:
+                return datetime
+            return DatetimeTZDtype
+        elif isinstance(sqltype, DateTime):
             # Caution: np.datetime64 is also a subclass of np.number.
             return datetime
-        if isinstance(sqltype, Date):
+        elif isinstance(sqltype, Date):
             return date
-        if isinstance(sqltype, Boolean):
+        elif isinstance(sqltype, Boolean):
             return bool
         return object
 
@@ -1061,13 +1080,13 @@ class SQLDatabase(PandasSQL):
         ----------
         table_name : string
             Name of SQL table in database
-        index_col : string, optional
+        index_col : string, optional, default: None
             Column to set as index
         coerce_float : boolean, default True
             Attempt to convert values to non-string, non-numeric objects
             (like decimal.Decimal) to floating point. This can result in
             loss of precision.
-        parse_dates : list or dict
+        parse_dates : list or dict, default: None
             - List of column names to parse as dates
             - Dict of ``{column_name: format string}`` where format string is
               strftime compatible in case of parsing string times or is one of
@@ -1076,7 +1095,7 @@ class SQLDatabase(PandasSQL):
               to the keyword arguments of :func:`pandas.to_datetime`.
               Especially useful with databases without native Datetime support,
               such as SQLite
-        columns : list
+        columns : list, default: None
             List of column names to select from sql table
         schema : string, default None
             Name of SQL schema in database to query (if database flavor
@@ -1123,18 +1142,18 @@ class SQLDatabase(PandasSQL):
         ----------
         sql : string
             SQL query to be executed
-        index_col : string, optional
+        index_col : string, optional, default: None
             Column name to use as index for the returned DataFrame object.
         coerce_float : boolean, default True
             Attempt to convert values to non-string, non-numeric objects (like
             decimal.Decimal) to floating point, useful for SQL result sets
-        params : list, tuple or dict, optional
+        params : list, tuple or dict, optional, default: None
             List of parameters to pass to execute method.  The syntax used
             to pass parameters is database driver dependent. Check your
             database driver documentation for which of the five syntax styles,
             described in PEP 249's paramstyle, is supported.
             Eg. for psycopg2, uses %(name)s so use params={'name' : 'value'}
-        parse_dates : list or dict
+        parse_dates : list or dict, default: None
             - List of column names to parse as dates
             - Dict of ``{column_name: format string}`` where format string is
               strftime compatible in case of parsing string times or is one of
@@ -1143,6 +1162,9 @@ class SQLDatabase(PandasSQL):
               to the keyword arguments of :func:`pandas.to_datetime`
               Especially useful with databases without native Datetime support,
               such as SQLite
+        chunksize : int, default None
+            If specified, return an iterator where `chunksize` is the number
+            of rows to include in each chunk.
 
         Returns
         -------
@@ -1409,7 +1431,7 @@ class SQLiteTable(SQLTable):
         pat = re.compile('\s+')
         column_names = [col_name for col_name, _, _ in column_names_and_types]
         if any(map(pat.search, column_names)):
-            warnings.warn(_SAFE_NAMES_WARNING)
+            warnings.warn(_SAFE_NAMES_WARNING, stacklevel=6)
 
         flv = self.pd_sql.flavor
         escape = _SQL_GET_IDENTIFIER[flv]
@@ -1450,7 +1472,7 @@ class SQLiteTable(SQLTable):
         if col_type == 'timedelta64':
             warnings.warn("the 'timedelta' type is not supported, and will be "
                           "written as integer values (ns frequency) to the "
-                          "database.", UserWarning)
+                          "database.", UserWarning, stacklevel=8)
             col_type = "integer"
 
         elif col_type == "datetime64":
@@ -1650,11 +1672,11 @@ def get_schema(frame, name, flavor='sqlite', keys=None, con=None, dtype=None):
         The flavor of SQL to use. Ignored when using SQLAlchemy connectable.
         'mysql' is deprecated and will be removed in future versions, but it
         will be further supported through SQLAlchemy engines.
-    keys : string or sequence
+    keys : string or sequence, default: None
         columns to use a primary key
     con: an open SQL database connection object or a SQLAlchemy connectable
         Using SQLAlchemy makes it possible to use any DB supported by that
-        library.
+        library, default: None
         If a DBAPI2 object, only sqlite3 is supported.
     dtype : dict of column name to SQL type, default None
         Optional specifying the datatype for columns. The SQL type should
@@ -1672,7 +1694,8 @@ def get_schema(frame, name, flavor='sqlite', keys=None, con=None, dtype=None):
 def read_frame(*args, **kwargs):
     """DEPRECATED - use read_sql
     """
-    warnings.warn("read_frame is deprecated, use read_sql", FutureWarning)
+    warnings.warn("read_frame is deprecated, use read_sql", FutureWarning,
+                  stacklevel=2)
     return read_sql(*args, **kwargs)
 
 
@@ -1680,7 +1703,8 @@ def read_frame(*args, **kwargs):
 def frame_query(*args, **kwargs):
     """DEPRECATED - use read_sql
     """
-    warnings.warn("frame_query is deprecated, use read_sql", FutureWarning)
+    warnings.warn("frame_query is deprecated, use read_sql", FutureWarning,
+                  stacklevel=2)
     return read_sql(*args, **kwargs)
 
 
@@ -1718,7 +1742,8 @@ def write_frame(frame, name, con, flavor='sqlite', if_exists='fail', **kwargs):
     pandas.DataFrame.to_sql
 
     """
-    warnings.warn("write_frame is deprecated, use to_sql", FutureWarning)
+    warnings.warn("write_frame is deprecated, use to_sql", FutureWarning,
+                  stacklevel=2)
 
     # for backwards compatibility, set index=False when not specified
     index = kwargs.pop('index', False)

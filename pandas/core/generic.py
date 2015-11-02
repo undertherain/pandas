@@ -3,6 +3,7 @@ import warnings
 import operator
 import weakref
 import gc
+
 import numpy as np
 import pandas.lib as lib
 
@@ -15,6 +16,7 @@ from pandas.tseries.index import DatetimeIndex
 from pandas.tseries.period import PeriodIndex
 from pandas.core.internals import BlockManager
 import pandas.core.common as com
+import pandas.core.missing as mis
 import pandas.core.datetools as datetools
 from pandas import compat
 from pandas.compat import map, zip, lrange, string_types, isidentifier
@@ -26,6 +28,7 @@ from pandas.core.common import (isnull, notnull, is_list_like,
 import pandas.core.nanops as nanops
 from pandas.util.decorators import Appender, Substitution, deprecate_kwarg
 from pandas.core import config
+
 
 # goal is to be able to define the docs close to function, while still being
 # able to share
@@ -48,7 +51,7 @@ def _single_replace(self, to_replace, method, inplace, limit):
 
     orig_dtype = self.dtype
     result = self if inplace else self.copy()
-    fill_f = com._get_fill_func(method)
+    fill_f = mis._get_fill_func(method)
 
     mask = com.mask_missing(result.values, to_replace)
     values = fill_f(result.values, limit=limit, mask=mask)
@@ -382,12 +385,12 @@ class NDFrame(PandasObject):
 
     @property
     def shape(self):
-        "tuple of axis dimensions"
+        "Return a tuple of axis dimensions"
         return tuple(len(self._get_axis(a)) for a in self._AXIS_ORDERS)
 
     @property
     def axes(self):
-        "index(es) of the NDFrame"
+        "Return index label(s) of the internal NDFrame"
         # we do it this way because if we have reversed axes, then
         # the block manager shows then reversed
         return [self._get_axis(a) for a in self._AXIS_ORDERS]
@@ -501,12 +504,17 @@ class NDFrame(PandasObject):
         """
         result = self[item]
         del self[item]
+        try:
+            result._reset_cacher()
+        except AttributeError:
+            pass
+
         return result
 
     def squeeze(self):
         """ squeeze length 1 dimensions """
         try:
-            return self.ix[tuple([slice(None) if len(a) > 1 else a[0]
+            return self.iloc[tuple([0 if len(a) == 1 else slice(None)
                                   for a in self.axes])]
         except:
             return self
@@ -701,7 +709,7 @@ class NDFrame(PandasObject):
         "iteritems alias used to get around 2to3. Deprecated"
         warnings.warn("iterkv is deprecated and will be removed in a future "
                       "release, use ``iteritems`` instead.",
-                      DeprecationWarning)
+                      FutureWarning, stacklevel=2)
         return self.iteritems(*args, **kwargs)
 
     def __len__(self):
@@ -922,6 +930,8 @@ class NDFrame(PandasObject):
             in the store wherever possible
         fletcher32 : bool, default False
             If applying compression use the fletcher32 checksum
+        dropna : boolean, default False.
+            If true, ALL nan rows will not be written to store.
 
         """
 
@@ -1003,20 +1013,6 @@ class NDFrame(PandasObject):
         """
         from pandas.io.pickle import to_pickle
         return to_pickle(self, path)
-
-    def save(self, path):  # TODO remove in 0.14
-        "Deprecated. Use to_pickle instead"
-        import warnings
-        from pandas.io.pickle import to_pickle
-        warnings.warn("save is deprecated, use to_pickle", FutureWarning)
-        return to_pickle(self, path)
-
-    def load(self, path):  # TODO remove in 0.14
-        "Deprecated. Use read_pickle instead."
-        import warnings
-        from pandas.io.pickle import read_pickle
-        warnings.warn("load is deprecated, use pd.read_pickle", FutureWarning)
-        return read_pickle(path)
 
     def to_clipboard(self, excel=None, sep=None, **kwargs):
         """
@@ -1105,6 +1101,11 @@ class NDFrame(PandasObject):
         """ set the _cacher attribute on the calling object with
             a weakref to cacher """
         self._cacher = (item, weakref.ref(cacher))
+
+    def _reset_cacher(self):
+        """ reset the cacher """
+        if hasattr(self,'_cacher'):
+            del self._cacher
 
     def _iget_item_cache(self, item):
         """ return the cached item, item represents a positional indexer """
@@ -1298,7 +1299,7 @@ class NDFrame(PandasObject):
                 t = ("\n"
                      "A value is trying to be set on a copy of a slice from a "
                      "DataFrame\n\n"
-                     "See the the caveats in the documentation: "
+                     "See the caveats in the documentation: "
                      "http://pandas.pydata.org/pandas-docs/stable/indexing.html#indexing-view-versus-copy")
 
             else:
@@ -1306,7 +1307,7 @@ class NDFrame(PandasObject):
                      "A value is trying to be set on a copy of a slice from a "
                      "DataFrame.\n"
                      "Try using .loc[row_indexer,col_indexer] = value instead\n\n"
-                     "See the the caveats in the documentation: "
+                     "See the caveats in the documentation: "
                      "http://pandas.pydata.org/pandas-docs/stable/indexing.html#indexing-view-versus-copy")
 
             if value == 'raise':
@@ -1342,6 +1343,7 @@ class NDFrame(PandasObject):
             # exception:
             self._data.delete(key)
 
+        # delete from the caches
         try:
             del self._item_cache[key]
         except KeyError:
@@ -1549,7 +1551,8 @@ class NDFrame(PandasObject):
 
         return self.reindex(**{axis_name: new_axis})
 
-    def reindex_like(self, other, method=None, copy=True, limit=None):
+    def reindex_like(self, other, method=None, copy=True, limit=None,
+                     tolerance=None):
         """ return an object with matching indicies to myself
 
         Parameters
@@ -1558,7 +1561,12 @@ class NDFrame(PandasObject):
         method : string or None
         copy : boolean, default True
         limit : int, default None
-            Maximum size gap to forward or backward fill
+            Maximum number of consecutive labels to fill for inexact matches.
+        tolerance : optional
+            Maximum distance between labels of the other object and this
+            object for inexact matches.
+
+            .. versionadded:: 0.17.0
 
         Notes
         -----
@@ -1570,7 +1578,8 @@ class NDFrame(PandasObject):
         reindexed : same as input
         """
         d = other._construct_axes_dict(axes=self._AXIS_ORDERS,
-                method=method, copy=copy, limit=limit)
+                method=method, copy=copy, limit=limit,
+                tolerance=tolerance)
 
         return self.reindex(**d)
 
@@ -1681,24 +1690,73 @@ class NDFrame(PandasObject):
         new_data = self._data.add_suffix(suffix)
         return self._constructor(new_data).__finalize__(self)
 
-    def sort_index(self, axis=0, ascending=True):
+    _shared_docs['sort_values'] = """
+        Sort by the values along either axis
+
+        .. versionadded:: 0.17.0
+
+        Parameters
+        ----------
+        by : string name or list of names which refer to the axis items
+        axis : %(axes)s to direct sorting
+        ascending : bool or list of bool
+             Sort ascending vs. descending. Specify list for multiple sort orders.
+             If this is a list of bools, must match the length of the by
+        inplace : bool
+             if True, perform operation in-place
+        kind : {`quicksort`, `mergesort`, `heapsort`}
+             Choice of sorting algorithm. See also ndarray.np.sort for more information.
+             `mergesort` is the only stable algorithm. For DataFrames, this option is
+             only applied when sorting on a single column or label.
+        na_position : {'first', 'last'}
+             `first` puts NaNs at the beginning, `last` puts NaNs at the end
+
+        Returns
+        -------
+        sorted_obj : %(klass)s
         """
+    def sort_values(self, by, axis=0, ascending=True, inplace=False,
+                    kind='quicksort', na_position='last'):
+        raise AbstractMethodError(self)
+
+    _shared_docs['sort_index'] = """
         Sort object by labels (along an axis)
 
         Parameters
         ----------
-        axis : {0, 1}
-            Sort index/rows versus columns
+        axis : %(axes)s to direct sorting
+        level : int or level name or list of ints or list of level names
+            if not None, sort on values in specified index level(s)
         ascending : boolean, default True
             Sort ascending vs. descending
+        inplace : bool
+            if True, perform operation in-place
+        kind : {`quicksort`, `mergesort`, `heapsort`}
+             Choice of sorting algorithm. See also ndarray.np.sort for more information.
+             `mergesort` is the only stable algorithm. For DataFrames, this option is
+             only applied when sorting on a single column or label.
+        na_position : {'first', 'last'}
+             `first` puts NaNs at the beginning, `last` puts NaNs at the end
+        sort_remaining : bool
+            if true and sorting by level and index is multilevel, sort by other levels
+            too (in order) after sorting by specified level
 
         Returns
         -------
-        sorted_obj : type of caller
+        sorted_obj : %(klass)s
         """
+
+    @Appender(_shared_docs['sort_index'] % dict(axes="axes", klass="NDFrame"))
+    def sort_index(self, axis=0, level=None, ascending=True, inplace=False,
+                   kind='quicksort', na_position='last', sort_remaining=True):
         axis = self._get_axis_number(axis)
         axis_name = self._get_axis_name(axis)
         labels = self._get_axis(axis)
+
+        if level is not None:
+            raise NotImplementedError("level is not implemented")
+        if inplace:
+            raise NotImplementedError("inplace is not implemented")
 
         sort_index = labels.argsort()
         if not ascending:
@@ -1720,7 +1778,9 @@ class NDFrame(PandasObject):
             New labels / index to conform to. Preferably an Index object to
             avoid duplicating data
         method : {None, 'backfill'/'bfill', 'pad'/'ffill', 'nearest'}, optional
-            Method to use for filling holes in reindexed DataFrame:
+            method to use for filling holes in reindexed DataFrame.
+            Please note: this is only  applicable to DataFrames/Series with a 
+            monotonically increasing/decreasing index.
               * default: don't fill gaps
               * pad / ffill: propagate last valid observation forward to next valid
               * backfill / bfill: use next valid observation to fill gap
@@ -1734,11 +1794,128 @@ class NDFrame(PandasObject):
             Value to use for missing values. Defaults to NaN, but can be any
             "compatible" value
         limit : int, default None
-            Maximum size gap to forward or backward fill
+            Maximum number of consecutive elements to forward or backward fill
+        tolerance : optional
+            Maximum distance between original and new labels for inexact
+            matches. The values of the index at the matching locations most
+            satisfy the equation ``abs(index[indexer] - target) <= tolerance``.
+
+            .. versionadded:: 0.17.0
 
         Examples
         --------
-        >>> df.reindex(index=[date1, date2, date3], columns=['A', 'B', 'C'])
+
+        Create a dataframe with some fictional data.
+
+        >>> index = ['Firefox', 'Chrome', 'Safari', 'IE10', 'Konqueror']
+        >>> df = pd.DataFrame({
+        ...      'http_status': [200,200,404,404,301],
+        ...      'response_time': [0.04, 0.02, 0.07, 0.08, 1.0]},
+        ...       index=index)
+        >>> df
+                    http_status  response_time
+        Firefox            200           0.04
+        Chrome             200           0.02
+        Safari             404           0.07
+        IE10               404           0.08
+        Konqueror          301           1.00
+
+        Create a new index and reindex the dataframe. By default
+        values in the new index that do not have corresponding
+        records in the dataframe are assigned ``NaN``. 
+
+        >>> new_index= ['Safari', 'Iceweasel', 'Comodo Dragon', 'IE10',
+        ...             'Chrome']
+        >>> df.reindex(new_index)
+                       http_status  response_time
+        Safari                 404           0.07
+        Iceweasel              NaN            NaN
+        Comodo Dragon          NaN            NaN
+        IE10                   404           0.08
+        Chrome                 200           0.02
+
+        We can fill in the missing values by passing a value to
+        the keyword ``fill_value``. Because the index is not monotonically
+        increasing or decreasing, we cannot use arguments to the keyword  
+        ``method`` to fill the ``NaN`` values. 
+
+        >>> df.reindex(new_index, fill_value=0)
+                       http_status  response_time
+        Safari                 404           0.07
+        Iceweasel                0           0.00
+        Comodo Dragon            0           0.00
+        IE10                   404           0.08
+        Chrome                 200           0.02
+
+        >>> df.reindex(new_index, fill_value='missing')
+                      http_status response_time
+        Safari                404          0.07
+        Iceweasel         missing       missing
+        Comodo Dragon     missing       missing
+        IE10                  404          0.08
+        Chrome                200          0.02
+
+        To further illustrate the filling functionality in 
+        ``reindex``, we will create a dataframe with a 
+        monotonically increasing index (for example, a sequence
+        of dates).
+
+        >>> date_index = pd.date_range('1/1/2010', periods=6, freq='D')
+        >>> df2 = pd.DataFrame({"prices": [100, 101, np.nan, 100, 89, 88]},
+                index=date_index)
+        >>> df2
+                    prices
+        2010-01-01     100
+        2010-01-02     101
+        2010-01-03     NaN
+        2010-01-04     100
+        2010-01-05      89
+        2010-01-06      88
+
+        Suppose we decide to expand the dataframe to cover a wider
+        date range. 
+
+        >>> date_index2 = pd.date_range('12/29/2009', periods=10, freq='D')
+        >>> df2.reindex(date_index2)
+                    prices
+        2009-12-29     NaN
+        2009-12-30     NaN
+        2009-12-31     NaN
+        2010-01-01     100
+        2010-01-02     101
+        2010-01-03     NaN
+        2010-01-04     100
+        2010-01-05      89
+        2010-01-06      88
+        2010-01-07     NaN
+
+        The index entries that did not have a value in the original data frame
+        (for example, '2009-12-29') are by default filled with ``NaN``. 
+        If desired, we can fill in the missing values using one of several
+        options. 
+        
+        For example, to backpropagate the last valid value to fill the ``NaN``
+        values, pass ``bfill`` as an argument to the ``method`` keyword.
+
+        >>> df2.reindex(date_index2, method='bfill')
+                    prices
+        2009-12-29     100
+        2009-12-30     100
+        2009-12-31     100
+        2010-01-01     100
+        2010-01-02     101
+        2010-01-03     NaN
+        2010-01-04     100
+        2010-01-05      89
+        2010-01-06      88
+        2010-01-07     NaN
+
+        Please note that the ``NaN`` value present in the original dataframe
+        (at index value 2010-01-03) will not be filled by any of the 
+        value propagation schemes. This is because filling while reindexing
+        does not look at dataframe values, but only compares the original and
+        desired indexes. If you do want to fill in the ``NaN`` values present
+        in the original dataframe, use the ``fillna()`` method.
 
         Returns
         -------
@@ -1752,10 +1929,11 @@ class NDFrame(PandasObject):
 
         # construct the args
         axes, kwargs = self._construct_axes_from_arguments(args, kwargs)
-        method = com._clean_reindex_fill_method(kwargs.pop('method', None))
+        method = mis._clean_reindex_fill_method(kwargs.pop('method', None))
         level = kwargs.pop('level', None)
         copy = kwargs.pop('copy', True)
         limit = kwargs.pop('limit', None)
+        tolerance = kwargs.pop('tolerance', None)
         fill_value = kwargs.pop('fill_value', np.nan)
 
         if kwargs:
@@ -1780,10 +1958,11 @@ class NDFrame(PandasObject):
                 pass
 
         # perform the reindex on the axes
-        return self._reindex_axes(axes, level, limit,
+        return self._reindex_axes(axes, level, limit, tolerance,
                                   method, fill_value, copy).__finalize__(self)
 
-    def _reindex_axes(self, axes, level, limit, method, fill_value, copy):
+    def _reindex_axes(self, axes, level, limit, tolerance, method,
+                      fill_value, copy):
         """ perform the reinxed for all the axes """
         obj = self
         for a in self._AXIS_ORDERS:
@@ -1793,7 +1972,8 @@ class NDFrame(PandasObject):
 
             ax = self._get_axis(a)
             new_index, indexer = ax.reindex(
-                labels, level=level, limit=limit, method=method)
+                labels, level=level, limit=limit, tolerance=tolerance,
+                method=method)
 
             axis = self._get_axis_number(a)
             obj = obj._reindex_with_indexers(
@@ -1834,7 +2014,13 @@ class NDFrame(PandasObject):
             Broadcast across a level, matching Index values on the
             passed MultiIndex level
         limit : int, default None
-            Maximum size gap to forward or backward fill
+            Maximum number of consecutive elements to forward or backward fill
+        tolerance : optional
+            Maximum distance between original and new labels for inexact
+            matches. The values of the index at the matching locations most
+            satisfy the equation ``abs(index[indexer] - target) <= tolerance``.
+
+            .. versionadded:: 0.17.0
 
         Examples
         --------
@@ -1856,7 +2042,7 @@ class NDFrame(PandasObject):
 
         axis_name = self._get_axis_name(axis)
         axis_values = self._get_axis(axis_name)
-        method = com._clean_reindex_fill_method(method)
+        method = mis._clean_reindex_fill_method(method)
         new_index, indexer = axis_values.reindex(labels, method, level,
                                                  limit=limit)
         return self._reindex_with_indexers(
@@ -1980,9 +2166,14 @@ class NDFrame(PandasObject):
             Sample with or without replacement. Default = False.
         weights : str or ndarray-like, optional
             Default 'None' results in equal probability weighting.
+            If passed a Series, will align with target object on index. Index
+            values in weights not found in sampled object will be ignored and
+            index values in sampled object not in weights will be assigned
+            weights of zero.
             If called on a DataFrame, will accept the name of a column
             when axis = 0.
-            Weights must be same length as axis being sampled.
+            Unless weights are a Series, weights must be same length as axis
+            being sampled.
             If weights do not sum to 1, they will be normalized to sum to 1.
             Missing values in the weights column will be treated as zero.
             inf and -inf values not allowed.
@@ -1995,7 +2186,7 @@ class NDFrame(PandasObject):
 
         Returns
         -------
-        Same type as caller.
+        A new object of same type as caller.
         """
 
         if axis is None:
@@ -2009,6 +2200,10 @@ class NDFrame(PandasObject):
 
         # Check weights for compliance
         if weights is not None:
+
+            # If a series, align with frame
+            if isinstance(weights, pd.Series):
+                weights = weights.reindex(self.axes[axis])
 
             # Strings acceptable if a dataframe and axis = 0
             if isinstance(weights, string_types):
@@ -2039,7 +2234,10 @@ class NDFrame(PandasObject):
 
             # Renormalize if don't sum to 1
             if weights.sum() != 1:
-                weights = weights / weights.sum()
+                if weights.sum() != 0:
+                    weights = weights / weights.sum()
+                else:
+                    raise ValueError("Invalid weights: weights sum to zero")
 
             weights = weights.values
 
@@ -2058,7 +2256,8 @@ class NDFrame(PandasObject):
             raise ValueError("A negative number of rows requested. Please provide positive value.")
 
         locs = rs.choice(axis_length, size=n, replace=replace, p=weights)
-        return self.take(locs, axis=axis)
+        return self.take(locs, axis=axis, is_copy=False)
+
 
     _shared_docs['pipe'] = ("""
         Apply func(self, \*args, \*\*kwargs)
@@ -2335,6 +2534,11 @@ class NDFrame(PandasObject):
         return self.as_matrix()
 
     @property
+    def _values(self):
+        """ internal implementation """
+        return self.values
+
+    @property
     def _get_values(self):
         # compat
         return self.as_matrix()
@@ -2381,6 +2585,8 @@ class NDFrame(PandasObject):
         Parameters
         ----------
         copy : boolean, default True
+
+               .. versionadded: 0.16.1
 
         Returns
         -------
@@ -2442,11 +2648,8 @@ class NDFrame(PandasObject):
         data = self._data.copy(deep=deep)
         return self._constructor(data).__finalize__(self)
 
-    @deprecate_kwarg(old_arg_name='convert_dates', new_arg_name='datetime')
-    @deprecate_kwarg(old_arg_name='convert_numeric', new_arg_name='numeric')
-    @deprecate_kwarg(old_arg_name='convert_timedeltas', new_arg_name='timedelta')
-    def convert_objects(self, datetime=False, numeric=False,
-                        timedelta=False, coerce=False, copy=True):
+    def _convert(self, datetime=False, numeric=False, timedelta=False,
+                 coerce=False, copy=True):
         """
         Attempt to infer better dtype for object columns
 
@@ -2473,9 +2676,46 @@ class NDFrame(PandasObject):
         """
         return self._constructor(
             self._data.convert(datetime=datetime,
-                               numeric=numeric,
-                               timedelta=timedelta,
-                               coerce=coerce,
+                                numeric=numeric,
+                                timedelta=timedelta,
+                                coerce=coerce,
+                                copy=copy)).__finalize__(self)
+
+    # TODO: Remove in 0.18 or 2017, which ever is sooner
+    def convert_objects(self, convert_dates=True, convert_numeric=False,
+                        convert_timedeltas=True, copy=True):
+        """
+        Attempt to infer better dtype for object columns
+
+        Parameters
+        ----------
+        convert_dates : boolean, default True
+            If True, convert to date where possible. If 'coerce', force
+            conversion, with unconvertible values becoming NaT.
+        convert_numeric : boolean, default False
+            If True, attempt to coerce to numbers (including strings), with
+            unconvertible values becoming NaN.
+        convert_timedeltas : boolean, default True
+            If True, convert to timedelta where possible. If 'coerce', force
+            conversion, with unconvertible values becoming NaT.
+        copy : boolean, default True
+            If True, return a copy even if no copy is necessary (e.g. no
+            conversion was done). Note: This is meant for internal use, and
+            should not be confused with inplace.
+
+        Returns
+        -------
+        converted : same as input object
+        """
+        from warnings import warn
+        warn("convert_objects is deprecated.  Use the data-type specific "
+             "converters pd.to_datetime, pd.to_timedelta and pd.to_numeric.",
+             FutureWarning, stacklevel=2)
+
+        return self._constructor(
+            self._data.convert(convert_dates=convert_dates,
+                               convert_numeric=convert_numeric,
+                               convert_timedeltas=convert_timedeltas,
                                copy=copy)).__finalize__(self)
 
     #----------------------------------------------------------------------
@@ -2536,7 +2776,7 @@ class NDFrame(PandasObject):
         if axis is None:
             axis = 0
         axis = self._get_axis_number(axis)
-        method = com._clean_fill_method(method)
+        method = mis._clean_fill_method(method)
 
         from pandas import DataFrame
         if value is None:
@@ -2567,7 +2807,7 @@ class NDFrame(PandasObject):
                 return self._constructor.from_dict(result).__finalize__(self)
 
             # 2d or less
-            method = com._clean_fill_method(method)
+            method = mis._clean_fill_method(method)
             new_data = self._data.interpolate(method=method,
                                               axis=axis,
                                               limit=limit,
@@ -2873,15 +3113,13 @@ class NDFrame(PandasObject):
                            '{0!r}').format(type(to_replace).__name__)
                     raise TypeError(msg)  # pragma: no cover
 
-        new_data = new_data.convert(copy=not inplace, numeric=False)
-
         if inplace:
             self._update_inplace(new_data)
         else:
             return self._constructor(new_data).__finalize__(self)
 
     def interpolate(self, method='linear', axis=0, limit=None, inplace=False,
-                    downcast=None, **kwargs):
+                    limit_direction='forward', downcast=None, **kwargs):
         """
         Interpolate values according to different methods.
 
@@ -2895,26 +3133,35 @@ class NDFrame(PandasObject):
                   'polynomial', 'spline' 'piecewise_polynomial', 'pchip'}
 
             * 'linear': ignore the index and treat the values as equally
-              spaced. default
+              spaced. This is the only method supported on MultiIndexes.
+              default
             * 'time': interpolation works on daily and higher resolution
               data to interpolate given length of interval
             * 'index', 'values': use the actual numerical values of the index
             * 'nearest', 'zero', 'slinear', 'quadratic', 'cubic',
               'barycentric', 'polynomial' is passed to
-              `scipy.interpolate.interp1d` with the order given both
-              'polynomial' and 'spline' requre that you also specify and order
-              (int) e.g. df.interpolate(method='polynomial', order=4)
+              ``scipy.interpolate.interp1d``. Both 'polynomial' and 'spline'
+              require that you also specify an `order` (int),
+              e.g. df.interpolate(method='polynomial', order=4).
+              These use the actual numerical values of the index.
             * 'krogh', 'piecewise_polynomial', 'spline', and 'pchip' are all
               wrappers around the scipy interpolation methods of similar
-              names. See the scipy documentation for more on their behavior:
-              http://docs.scipy.org/doc/scipy/reference/interpolate.html#univariate-interpolation
-              http://docs.scipy.org/doc/scipy/reference/tutorial/interpolate.html
+              names. These use the actual numerical values of the index. See
+              the scipy documentation for more on their behavior
+              `here <http://docs.scipy.org/doc/scipy/reference/interpolate.html#univariate-interpolation>`__
+              `and here <http://docs.scipy.org/doc/scipy/reference/tutorial/interpolate.html>`__
 
         axis : {0, 1}, default 0
             * 0: fill column-by-column
             * 1: fill row-by-row
         limit : int, default None.
             Maximum number of consecutive NaNs to fill.
+        limit_direction : {'forward', 'backward', 'both'}, defaults to 'forward'
+            If limit is specified, consecutive NaNs will be filled in this
+            direction.
+
+            .. versionadded:: 0.17.0
+
         inplace : bool, default False
             Update the NDFrame in place if possible.
         downcast : optional, 'infer' or None, defaults to None
@@ -2985,6 +3232,7 @@ class NDFrame(PandasObject):
             index=index,
             values=_maybe_transposed_self,
             limit=limit,
+            limit_direction=limit_direction,
             inplace=inplace,
             downcast=downcast,
             **kwargs
@@ -3154,11 +3402,13 @@ class NDFrame(PandasObject):
             index. Only relevant for DataFrame input. as_index=False is
             effectively "SQL-style" grouped output
         sort : boolean, default True
-            Sort group keys. Get better performance by turning this off
+            Sort group keys. Get better performance by turning this off.
+            Note this does not influence the order of observations within each group.
+            groupby preserves the order of rows within each group.
         group_keys : boolean, default True
             When calling apply, add group keys to index to identify pieces
         squeeze : boolean, default False
-            reduce the dimensionaility of the return type if possible,
+            reduce the dimensionality of the return type if possible,
             otherwise return a consistent type
 
         Examples
@@ -3283,7 +3533,107 @@ class NDFrame(PandasObject):
             For frequencies that evenly subdivide 1 day, the "origin" of the
             aggregated intervals. For example, for '5min' frequency, base could
             range from 0 through 4. Defaults to 0
+
+
+        Examples
+        --------
+
+        Start by creating a series with 9 one minute timestamps.
+
+        >>> index = pd.date_range('1/1/2000', periods=9, freq='T')
+        >>> series = pd.Series(range(9), index=index)
+        >>> series
+        2000-01-01 00:00:00    0
+        2000-01-01 00:01:00    1
+        2000-01-01 00:02:00    2
+        2000-01-01 00:03:00    3
+        2000-01-01 00:04:00    4
+        2000-01-01 00:05:00    5
+        2000-01-01 00:06:00    6
+        2000-01-01 00:07:00    7
+        2000-01-01 00:08:00    8
+        Freq: T, dtype: int64
+
+        Downsample the series into 3 minute bins and sum the values
+        of the timestamps falling into a bin.
+
+        >>> series.resample('3T', how='sum')
+        2000-01-01 00:00:00     3
+        2000-01-01 00:03:00    12
+        2000-01-01 00:06:00    21
+        Freq: 3T, dtype: int64
+
+        Downsample the series into 3 minute bins as above, but label each
+        bin using the right edge instead of the left. Please note that the
+        value in the bucket used as the label is not included in the bucket,
+        which it labels. For example, in the original series the
+        bucket ``2000-01-01 00:03:00`` contains the value 3, but the summed
+        value in the resampled bucket with the label``2000-01-01 00:03:00``
+        does not include 3 (if it did, the summed value would be 6, not 3).
+        To include this value close the right side of the bin interval as
+        illustrated in the example below this one.
+
+        >>> series.resample('3T', how='sum', label='right')
+        2000-01-01 00:03:00     3
+        2000-01-01 00:06:00    12
+        2000-01-01 00:09:00    21
+        Freq: 3T, dtype: int64
+
+        Downsample the series into 3 minute bins as above, but close the right
+        side of the bin interval.
+
+        >>> series.resample('3T', how='sum', label='right', closed='right')
+        2000-01-01 00:00:00     0
+        2000-01-01 00:03:00     6
+        2000-01-01 00:06:00    15
+        2000-01-01 00:09:00    15
+        Freq: 3T, dtype: int64
+
+        Upsample the series into 30 second bins.
+
+        >>> series.resample('30S')[0:5] #select first 5 rows
+        2000-01-01 00:00:00     0
+        2000-01-01 00:00:30   NaN
+        2000-01-01 00:01:00     1
+        2000-01-01 00:01:30   NaN
+        2000-01-01 00:02:00     2
+        Freq: 30S, dtype: float64
+
+        Upsample the series into 30 second bins and fill the ``NaN``
+        values using the ``pad`` method.
+
+        >>> series.resample('30S', fill_method='pad')[0:5]
+        2000-01-01 00:00:00    0
+        2000-01-01 00:00:30    0
+        2000-01-01 00:01:00    1
+        2000-01-01 00:01:30    1
+        2000-01-01 00:02:00    2
+        Freq: 30S, dtype: int64
+
+        Upsample the series into 30 second bins and fill the
+        ``NaN`` values using the ``bfill`` method.
+
+        >>> series.resample('30S', fill_method='bfill')[0:5]
+        2000-01-01 00:00:00    0
+        2000-01-01 00:00:30    1
+        2000-01-01 00:01:00    1
+        2000-01-01 00:01:30    2
+        2000-01-01 00:02:00    2
+        Freq: 30S, dtype: int64
+
+        Pass a custom function to ``how``.
+
+        >>> def custom_resampler(array_like):
+        ...     return np.sum(array_like)+5
+
+        >>> series.resample('3T', how=custom_resampler)
+        2000-01-01 00:00:00     8
+        2000-01-01 00:03:00    17
+        2000-01-01 00:06:00    26
+        Freq: 3T, dtype: int64
+
         """
+
         from pandas.tseries.resample import TimeGrouper
         axis = self._get_axis_number(axis)
         sampler = TimeGrouper(rule, label=label, closed=closed, how=how,
@@ -3358,8 +3708,7 @@ class NDFrame(PandasObject):
         start = self.index.searchsorted(start_date, side='right')
         return self.ix[start:]
 
-    def align(self, other, join='outer', axis=None, level=None, copy=True,
-              fill_value=None, method=None, limit=None, fill_axis=0):
+    _shared_docs['align'] = (
         """
         Align two object on their axes with the
         specified join method for each axis Index
@@ -3381,16 +3730,45 @@ class NDFrame(PandasObject):
             "compatible" value
         method : str, default None
         limit : int, default None
-        fill_axis : {0, 1}, default 0
+        fill_axis : %(axes_single_arg)s, default 0
             Filling axis, method and limit
+        broadcast_axis : %(axes_single_arg)s, default None
+            Broadcast values along this axis, if aligning two objects of
+            different dimensions
+
+            .. versionadded:: 0.17.0
 
         Returns
         -------
-        (left, right) : (type of input, type of other)
+        (left, right) : (%(klass)s, type of other)
             Aligned objects
         """
+    )
+
+    @Appender(_shared_docs['align'] % _shared_doc_kwargs)
+    def align(self, other, join='outer', axis=None, level=None, copy=True,
+              fill_value=None, method=None, limit=None, fill_axis=0,
+              broadcast_axis=None):
         from pandas import DataFrame, Series
-        method = com._clean_fill_method(method)
+        method = mis._clean_fill_method(method)
+
+        if broadcast_axis == 1 and self.ndim != other.ndim:
+            if isinstance(self, Series):
+                # this means other is a DataFrame, and we need to broadcast self
+                df = DataFrame(dict((c, self) for c in other.columns),
+                               **other._construct_axes_dict())
+                return df._align_frame(other, join=join, axis=axis, level=level,
+                                       copy=copy, fill_value=fill_value,
+                                       method=method, limit=limit,
+                                       fill_axis=fill_axis)
+            elif isinstance(other, Series):
+                # this means self is a DataFrame, and we need to broadcast other
+                df = DataFrame(dict((c, other) for c in self.columns),
+                               **self._construct_axes_dict())
+                return self._align_frame(df, join=join, axis=axis, level=level,
+                                         copy=copy, fill_value=fill_value,
+                                         method=method, limit=limit,
+                                         fill_axis=fill_axis)
 
         if axis is not None:
             axis = self._get_axis_number(axis)
@@ -3427,11 +3805,11 @@ class NDFrame(PandasObject):
                     self.columns.join(other.columns, how=join, level=level,
                                       return_indexers=True)
 
-        left = self._reindex_with_indexers({0: [join_index,   ilidx],
+        left = self._reindex_with_indexers({0: [join_index, ilidx],
                                             1: [join_columns, clidx]},
                                            copy=copy, fill_value=fill_value,
                                            allow_dups=True)
-        right = other._reindex_with_indexers({0: [join_index,   iridx],
+        right = other._reindex_with_indexers({0: [join_index, iridx],
                                               1: [join_columns, cridx]},
                                              copy=copy, fill_value=fill_value,
                                              allow_dups=True)
@@ -3535,7 +3913,7 @@ class NDFrame(PandasObject):
               try_cast=False, raise_on_error=True):
 
         if isinstance(cond, NDFrame):
-            cond = cond.reindex(**self._construct_axes_dict())
+            cond, _ = cond.align(self, join='right', broadcast_axis=1)
         else:
             if not hasattr(cond, 'shape'):
                 raise ValueError('where requires an ndarray like object for '
@@ -3660,19 +4038,31 @@ class NDFrame(PandasObject):
             else:
                 other = self._constructor(other, **self._construct_axes_dict())
 
+        if axis is None:
+            axis = 0
+
+        if self.ndim == getattr(other, 'ndim', 0):
+            align = True
+        else:
+            align = (self._get_axis_number(axis) == 1)
+
+        block_axis = self._get_block_manager_axis(axis)
+
         if inplace:
             # we may have different type blocks come out of putmask, so
             # reconstruct the block manager
 
             self._check_inplace_setting(other)
-            new_data = self._data.putmask(mask=cond, new=other, align=axis is None,
-                                          inplace=True)
+            new_data = self._data.putmask(mask=cond, new=other, align=align,
+                                          inplace=True, axis=block_axis,
+                                          transpose=self._AXIS_REVERSED)
             self._update_inplace(new_data)
 
         else:
-            new_data = self._data.where(other=other, cond=cond, align=axis is None,
+            new_data = self._data.where(other=other, cond=cond, align=align,
                                         raise_on_error=raise_on_error,
-                                        try_cast=try_cast)
+                                        try_cast=try_cast, axis=block_axis,
+                                        transpose=self._AXIS_REVERSED)
 
             return self._constructor(new_data).__finalize__(self)
 
@@ -3705,15 +4095,15 @@ class NDFrame(PandasObject):
         shifted : %(klass)s
     """)
     @Appender(_shared_docs['shift'] % _shared_doc_kwargs)
-    def shift(self, periods=1, freq=None, axis=0, **kwargs):
+    def shift(self, periods=1, freq=None, axis=0):
         if periods == 0:
             return self
 
         block_axis = self._get_block_manager_axis(axis)
-        if freq is None and not len(kwargs):
+        if freq is None:
             new_data = self._data.shift(periods=periods, axis=block_axis)
         else:
-            return self.tshift(periods, freq, **kwargs)
+            return self.tshift(periods, freq)
 
         return self._constructor(new_data).__finalize__(self)
 
@@ -3753,7 +4143,7 @@ class NDFrame(PandasObject):
 
         return new_obj.__finalize__(self)
 
-    def tshift(self, periods=1, freq=None, axis=0, **kwargs):
+    def tshift(self, periods=1, freq=None, axis=0):
         """
         Shift the time index, using the index's frequency if available
 
@@ -3776,7 +4166,6 @@ class NDFrame(PandasObject):
         -------
         shifted : NDFrame
         """
-        from pandas.core.datetools import _resolve_offset
 
         index = self._get_axis(axis)
         if freq is None:
@@ -3792,24 +4181,22 @@ class NDFrame(PandasObject):
         if periods == 0:
             return self
 
-        offset = _resolve_offset(freq, kwargs)
-
-        if isinstance(offset, string_types):
-            offset = datetools.to_offset(offset)
+        if isinstance(freq, string_types):
+            freq = datetools.to_offset(freq)
 
         block_axis = self._get_block_manager_axis(axis)
         if isinstance(index, PeriodIndex):
-            orig_offset = datetools.to_offset(index.freq)
-            if offset == orig_offset:
+            orig_freq = datetools.to_offset(index.freq)
+            if freq == orig_freq:
                 new_data = self._data.copy()
                 new_data.axes[block_axis] = index.shift(periods)
             else:
                 msg = ('Given freq %s does not match PeriodIndex freq %s' %
-                       (offset.rule_code, orig_offset.rule_code))
+                       (freq.rule_code, orig_freq.rule_code))
                 raise ValueError(msg)
         else:
             new_data = self._data.copy()
-            new_data.axes[block_axis] = index.shift(periods, offset)
+            new_data.axes[block_axis] = index.shift(periods, freq)
 
         return self._constructor(new_data).__finalize__(self)
 
@@ -3995,11 +4382,6 @@ class NDFrame(PandasObject):
 
         Parameters
         ----------
-        percentile_width : float, deprecated
-            The ``percentile_width`` argument will be removed in a future
-            version. Use ``percentiles`` instead.
-            width of the desired uncertainty interval, default is 50,
-            which corresponds to lower=25, upper=75
         percentiles : array-like, optional
             The percentiles to include in the output. Should all
             be in the interval [0, 1]. By default `percentiles` is
@@ -4048,36 +4430,17 @@ class NDFrame(PandasObject):
         """
 
     @Appender(_shared_docs['describe'] % _shared_doc_kwargs)
-    def describe(self, percentile_width=None, percentiles=None, include=None, exclude=None ):
+    def describe(self, percentiles=None, include=None, exclude=None ):
         if self.ndim >= 3:
             msg = "describe is not implemented on on Panel or PanelND objects."
             raise NotImplementedError(msg)
 
-        if percentile_width is not None and percentiles is not None:
-            msg = "Cannot specify both 'percentile_width' and 'percentiles.'"
-            raise ValueError(msg)
         if percentiles is not None:
             # get them all to be in [0, 1]
+            self._check_percentile(percentiles)
             percentiles = np.asarray(percentiles)
-            if (percentiles > 1).any():
-                percentiles = percentiles / 100.0
-                msg = ("percentiles should all be in the interval [0, 1]. "
-                       "Try {0} instead.")
-                raise ValueError(msg.format(list(percentiles)))
         else:
-            # only warn if they change the default
-            if percentile_width is not None:
-                do_warn = True
-            else:
-                do_warn = False
-            percentile_width = percentile_width or 50
-            lb = .5 * (1. - percentile_width / 100.)
-            ub = 1. - lb
-            percentiles = np.array([lb, 0.5, ub])
-            if do_warn:
-                msg = ("The `percentile_width` keyword is deprecated. "
-                       "Use percentiles={0} instead".format(list(percentiles)))
-                warnings.warn(msg, FutureWarning)
+            percentiles = np.array([0.25, 0.5, 0.75])
 
         # median should always be included
         if (percentiles != 0.5).all():  # median isn't included
@@ -4154,6 +4517,20 @@ class NDFrame(PandasObject):
                     names.append(name)
         d = pd.concat(ldesc, join_axes=pd.Index([names]), axis=1)
         return d
+
+    def _check_percentile(self, q):
+        """ Validate percentiles. Used by describe and quantile """
+
+        msg = ("percentiles should all be in the interval [0, 1]. "
+               "Try {0} instead.")
+        q = np.asarray(q)
+        if q.ndim == 0:
+            if not 0 <= q <= 1:
+                raise ValueError(msg.format(q / 100.0))
+        else:
+            if not all(0 <= qs <= 1 for qs in q):
+                raise ValueError(msg.format(q / 100.0))
+        return q
 
     _shared_docs['pct_change'] = """
         Percent change over given number of periods.

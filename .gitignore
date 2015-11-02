@@ -17,6 +17,7 @@
 .idea
 .vagrant
 .noseids
+.ipynb_checkpoints
 
 # Compiled source #
 ###################
@@ -77,6 +78,10 @@ scikits
 !np_datetime_strings.c
 *.c
 *.cpp
+
+# Performance Testing #
+#######################
+asv_bench/
 
 # Documentation generated files #
 #################################

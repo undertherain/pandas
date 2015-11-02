@@ -13,6 +13,7 @@ import pandas as pd
 from pandas import (Series, DataFrame, Panel, MultiIndex, Categorical, bdate_range,
                     date_range, timedelta_range, Index, DatetimeIndex, TimedeltaIndex, isnull)
 
+from pandas.compat import is_platform_windows, PY3
 from pandas.io.pytables import _tables, TableIterator
 try:
     _tables()
@@ -47,6 +48,10 @@ _default_compressor = LooseVersion(tables.__version__) >= '2.2' \
     and 'blosc' or 'zlib'
 
 _multiprocess_can_split_ = False
+
+# testing on windows/py3 seems to fault
+# for using compression
+skip_compression = PY3 and is_platform_windows()
 
 # contextmanager to ensure the file cleanup
 def safe_remove(path):
@@ -122,7 +127,7 @@ def _maybe_remove(store, key):
         pass
 
 
-def compat_assert_produces_warning(w,f):
+def compat_assert_produces_warning(w, f):
     """ don't produce a warning under PY3 """
     if compat.PY3:
         f()
@@ -156,7 +161,7 @@ class Base(tm.TestCase):
         pass
 
 
-class TestHDFStore(Base):
+class TestHDFStore(Base, tm.TestCase):
 
     def test_factory_fun(self):
         path = create_tempfile(self.path)
@@ -403,7 +408,7 @@ class TestHDFStore(Base):
             df['datetime1']  = datetime.datetime(2001,1,2,0,0)
             df['datetime2']  = datetime.datetime(2001,1,3,0,0)
             df.ix[3:6,['obj1']] = np.nan
-            df = df.consolidate().convert_objects(datetime=True)
+            df = df.consolidate()._convert(datetime=True)
 
             warnings.filterwarnings('ignore', category=PerformanceWarning)
             store['df'] = df
@@ -698,6 +703,9 @@ class TestHDFStore(Base):
 
     def test_put_compression_blosc(self):
         tm.skip_if_no_package('tables', '2.2', app='blosc support')
+        if skip_compression:
+            raise nose.SkipTest("skipping on windows/PY3")
+
         df = tm.makeTimeDataFrame()
 
         with ensure_clean_store(self.path) as store:
@@ -728,7 +736,7 @@ class TestHDFStore(Base):
         df['datetime1'] = datetime.datetime(2001, 1, 2, 0, 0)
         df['datetime2'] = datetime.datetime(2001, 1, 3, 0, 0)
         df.ix[3:6, ['obj1']] = np.nan
-        df = df.consolidate().convert_objects(datetime=True)
+        df = df.consolidate()._convert(datetime=True)
 
         with ensure_clean_store(self.path) as store:
             _maybe_remove(store, 'df')
@@ -930,6 +938,51 @@ class TestHDFStore(Base):
             result = store.select('df',Term('columns=A',encoding='ascii'))
             tm.assert_frame_equal(result,expected)
 
+    def test_latin_encoding(self):
+
+        if compat.PY2:
+            self.assertRaisesRegexp(TypeError, '\[unicode\] is not implemented as a table column')
+            return
+
+        values = [[b'E\xc9, 17', b'', b'a', b'b', b'c'],
+                  [b'E\xc9, 17', b'a', b'b', b'c'],
+                  [b'EE, 17', b'', b'a', b'b', b'c'],
+                  [b'E\xc9, 17', b'\xf8\xfc', b'a', b'b', b'c'],
+                  [b'', b'a', b'b', b'c'],
+                  [b'\xf8\xfc', b'a', b'b', b'c'],
+                  [b'A\xf8\xfc', b'', b'a', b'b', b'c'],
+                  [np.nan, b'', b'b', b'c'],
+                  [b'A\xf8\xfc', np.nan, b'', b'b', b'c']]
+
+        def _try_decode(x, encoding='latin-1'):
+            try:
+                return x.decode(encoding)
+            except AttributeError:
+                return x
+        # not sure how to remove latin-1 from code in python 2 and 3
+        values = [[_try_decode(x) for x in y] for y in values]
+
+        examples = []
+        for dtype in ['category', object]:
+            for val in values:
+                examples.append(pandas.Series(val, dtype=dtype))
+
+        def roundtrip(s, key='data', encoding='latin-1', nan_rep=''):
+            with ensure_clean_path(self.path) as store:
+                s.to_hdf(store, key, format='table', encoding=encoding,
+                        nan_rep=nan_rep)
+                retr = read_hdf(store, key)
+                s_nan = s.replace(nan_rep, np.nan)
+                assert_series_equal(s_nan, retr)
+
+        for s in examples:
+            roundtrip(s)
+
+        # fails:
+        # for x in examples:
+        #     roundtrip(s, nan_rep=b'\xf8\xfc')
+
+
     def test_append_some_nans(self):
 
         with ensure_clean_store(self.path) as store:
@@ -1039,6 +1092,28 @@ class TestHDFStore(Base):
             store.append('df2', df[:10], dropna=False)
             store.append('df2', df[10:], dropna=False)
             tm.assert_frame_equal(store['df2'], df)
+
+        # Test to make sure defaults are to not drop.
+        # Corresponding to Issue 9382
+        df_with_missing = DataFrame({'col1':[0, np.nan, 2], 'col2':[1, np.nan,  np.nan]})
+
+        with ensure_clean_path(self.path) as path:
+            df_with_missing.to_hdf(path, 'df_with_missing', format = 'table')
+            reloaded = read_hdf(path, 'df_with_missing')
+            tm.assert_frame_equal(df_with_missing, reloaded)
+
+        matrix = [[[np.nan, np.nan, np.nan],[1,np.nan,np.nan]],
+            [[np.nan, np.nan, np.nan], [np.nan,5,6]],
+            [[np.nan, np.nan, np.nan],[np.nan,3,np.nan]]]
+
+        panel_with_missing = Panel(matrix, items=['Item1', 'Item2','Item3'],
+                   major_axis=[1,2],
+                   minor_axis=['A', 'B', 'C'])
+
+        with ensure_clean_path(self.path) as path:
+           panel_with_missing.to_hdf(path, 'panel_with_missing', format='table')
+           reloaded_panel = read_hdf(path, 'panel_with_missing')
+           tm.assert_panel_equal(panel_with_missing, reloaded_panel)
 
     def test_append_frame_column_oriented(self):
 
@@ -1381,7 +1456,7 @@ class TestHDFStore(Base):
             df_dc.ix[7:9, 'string'] = 'bar'
             df_dc['string2'] = 'cool'
             df_dc['datetime'] = Timestamp('20010102')
-            df_dc = df_dc.convert_objects(datetime=True)
+            df_dc = df_dc._convert(datetime=True)
             df_dc.ix[3:5, ['A', 'B', 'datetime']] = np.nan
 
             _maybe_remove(store, 'df_dc')
@@ -1843,7 +1918,7 @@ class TestHDFStore(Base):
         df['datetime1'] = datetime.datetime(2001, 1, 2, 0, 0)
         df['datetime2'] = datetime.datetime(2001, 1, 3, 0, 0)
         df.ix[3:6, ['obj1']] = np.nan
-        df = df.consolidate().convert_objects(datetime=True)
+        df = df.consolidate()._convert(datetime=True)
 
         with ensure_clean_store(self.path) as store:
             store.append('df1_mixed', df)
@@ -1899,78 +1974,11 @@ class TestHDFStore(Base):
         df['obj1'] = 'foo'
         df['obj2'] = 'bar'
         df['datetime1'] = datetime.date(2001, 1, 2)
-        df = df.consolidate().convert_objects(datetime=True)
+        df = df.consolidate()._convert(datetime=True)
 
         with ensure_clean_store(self.path) as store:
             # this fails because we have a date in the object block......
             self.assertRaises(TypeError, store.append, 'df_unimplemented', df)
-
-    def test_append_with_timezones_pytz(self):
-
-        from datetime import timedelta
-
-        def compare(a,b):
-            tm.assert_frame_equal(a,b)
-
-            # compare the zones on each element
-            for c in a.columns:
-                for i in a.index:
-                    a_e = a[c][i]
-                    b_e = b[c][i]
-                    if not (a_e == b_e and a_e.tz == b_e.tz):
-                        raise AssertionError("invalid tz comparsion [%s] [%s]" % (a_e,b_e))
-
-        # as columns
-        with ensure_clean_store(self.path) as store:
-
-            _maybe_remove(store, 'df_tz')
-            df = DataFrame(dict(A = [ Timestamp('20130102 2:00:00',tz='US/Eastern') + timedelta(hours=1)*i for i in range(5) ]))
-            store.append('df_tz',df,data_columns=['A'])
-            result = store['df_tz']
-            compare(result,df)
-            assert_frame_equal(result,df)
-
-            # select with tz aware
-            compare(store.select('df_tz',where=Term('A>=df.A[3]')),df[df.A>=df.A[3]])
-
-            _maybe_remove(store, 'df_tz')
-            # ensure we include dates in DST and STD time here.
-            df = DataFrame(dict(A = Timestamp('20130102',tz='US/Eastern'), B = Timestamp('20130603',tz='US/Eastern')),index=range(5))
-            store.append('df_tz',df)
-            result = store['df_tz']
-            compare(result,df)
-            assert_frame_equal(result,df)
-
-            _maybe_remove(store, 'df_tz')
-            df = DataFrame(dict(A = Timestamp('20130102',tz='US/Eastern'), B = Timestamp('20130102',tz='EET')),index=range(5))
-            self.assertRaises(TypeError, store.append, 'df_tz', df)
-
-            # this is ok
-            _maybe_remove(store, 'df_tz')
-            store.append('df_tz',df,data_columns=['A','B'])
-            result = store['df_tz']
-            compare(result,df)
-            assert_frame_equal(result,df)
-
-            # can't append with diff timezone
-            df = DataFrame(dict(A = Timestamp('20130102',tz='US/Eastern'), B = Timestamp('20130102',tz='CET')),index=range(5))
-            self.assertRaises(ValueError, store.append, 'df_tz', df)
-
-        # as index
-        with ensure_clean_store(self.path) as store:
-
-            # GH 4098 example
-            df = DataFrame(dict(A = Series(lrange(3), index=date_range('2000-1-1',periods=3,freq='H', tz='US/Eastern'))))
-
-            _maybe_remove(store, 'df')
-            store.put('df',df)
-            result = store.select('df')
-            assert_frame_equal(result,df)
-
-            _maybe_remove(store, 'df')
-            store.append('df',df)
-            result = store.select('df')
-            assert_frame_equal(result,df)
 
     def test_calendar_roundtrip_issue(self):
 
@@ -1993,128 +2001,6 @@ class TestHDFStore(Base):
             store.append('table',s)
             result = store.select('table')
             assert_series_equal(result, s)
-
-    def test_append_with_timezones_dateutil(self):
-
-        from datetime import timedelta
-        tm._skip_if_no_dateutil()
-
-        # use maybe_get_tz instead of dateutil.tz.gettz to handle the windows filename issues.
-        from pandas.tslib import maybe_get_tz
-        gettz = lambda x: maybe_get_tz('dateutil/' + x)
-
-        def compare(a, b):
-            tm.assert_frame_equal(a, b)
-
-            # compare the zones on each element
-            for c in a.columns:
-                for i in a.index:
-                    a_e = a[c][i]
-                    b_e = b[c][i]
-                    if not (a_e == b_e and a_e.tz == b_e.tz):
-                        raise AssertionError("invalid tz comparsion [%s] [%s]" % (a_e, b_e))
-
-        # as columns
-        with ensure_clean_store(self.path) as store:
-
-            _maybe_remove(store, 'df_tz')
-            df = DataFrame(dict(A=[ Timestamp('20130102 2:00:00', tz=gettz('US/Eastern')) + timedelta(hours=1) * i for i in range(5) ]))
-            store.append('df_tz', df, data_columns=['A'])
-            result = store['df_tz']
-            compare(result, df)
-            assert_frame_equal(result, df)
-
-            # select with tz aware
-            compare(store.select('df_tz', where=Term('A>=df.A[3]')), df[df.A >= df.A[3]])
-
-            _maybe_remove(store, 'df_tz')
-            # ensure we include dates in DST and STD time here.
-            df = DataFrame(dict(A=Timestamp('20130102', tz=gettz('US/Eastern')), B=Timestamp('20130603', tz=gettz('US/Eastern'))), index=range(5))
-            store.append('df_tz', df)
-            result = store['df_tz']
-            compare(result, df)
-            assert_frame_equal(result, df)
-
-            _maybe_remove(store, 'df_tz')
-            df = DataFrame(dict(A=Timestamp('20130102', tz=gettz('US/Eastern')), B=Timestamp('20130102', tz=gettz('EET'))), index=range(5))
-            self.assertRaises(TypeError, store.append, 'df_tz', df)
-
-            # this is ok
-            _maybe_remove(store, 'df_tz')
-            store.append('df_tz', df, data_columns=['A', 'B'])
-            result = store['df_tz']
-            compare(result, df)
-            assert_frame_equal(result, df)
-
-            # can't append with diff timezone
-            df = DataFrame(dict(A=Timestamp('20130102', tz=gettz('US/Eastern')), B=Timestamp('20130102', tz=gettz('CET'))), index=range(5))
-            self.assertRaises(ValueError, store.append, 'df_tz', df)
-
-        # as index
-        with ensure_clean_store(self.path) as store:
-
-            # GH 4098 example
-            df = DataFrame(dict(A=Series(lrange(3), index=date_range('2000-1-1', periods=3, freq='H', tz=gettz('US/Eastern')))))
-
-            _maybe_remove(store, 'df')
-            store.put('df', df)
-            result = store.select('df')
-            assert_frame_equal(result, df)
-
-            _maybe_remove(store, 'df')
-            store.append('df', df)
-            result = store.select('df')
-            assert_frame_equal(result, df)
-
-    def test_store_timezone(self):
-        # GH2852
-        # issue storing datetime.date with a timezone as it resets when read back in a new timezone
-
-        # timezone setting not supported on windows
-        tm._skip_if_windows()
-
-        import datetime
-        import time
-        import os
-
-        # original method
-        with ensure_clean_store(self.path) as store:
-
-            today = datetime.date(2013,9,10)
-            df = DataFrame([1,2,3], index = [today, today, today])
-            store['obj1'] = df
-            result = store['obj1']
-            assert_frame_equal(result, df)
-
-        # with tz setting
-        orig_tz = os.environ.get('TZ')
-
-        def setTZ(tz):
-            if tz is None:
-                try:
-                    del os.environ['TZ']
-                except:
-                    pass
-            else:
-                os.environ['TZ']=tz
-                time.tzset()
-
-        try:
-
-            with ensure_clean_store(self.path) as store:
-
-                setTZ('EST5EDT')
-                today = datetime.date(2013,9,10)
-                df = DataFrame([1,2,3], index = [today, today, today])
-                store['obj1'] = df
-
-                setTZ('CST6CDT')
-                result = store['obj1']
-
-                assert_frame_equal(result, df)
-
-        finally:
-            setTZ(orig_tz)
 
     def test_append_with_timedelta(self):
         # GH 3577
@@ -2418,9 +2304,9 @@ class TestHDFStore(Base):
             p4d = tm.makePanel4D()
             wpneg = Panel.fromDict({-1: tm.makeDataFrame(), 0: tm.makeDataFrame(),
                                     1: tm.makeDataFrame()})
-            store.put('wp', wp, table=True)
-            store.put('p4d', p4d, table=True)
-            store.put('wpneg', wpneg, table=True)
+            store.put('wp', wp, format='table')
+            store.put('p4d', p4d, format='table')
+            store.put('wpneg', wpneg, format='table')
 
             # panel
             result = store.select('wp', [Term(
@@ -2449,7 +2335,8 @@ class TestHDFStore(Base):
                 [ "minor_axis=['A','B']", dict(field='major_axis', op='>', value='20121114') ]
                 ]
             for t in terms:
-                with tm.assert_produces_warning(expected_warning=DeprecationWarning):
+                with tm.assert_produces_warning(expected_warning=DeprecationWarning,
+                                                check_stacklevel=False):
                     Term(t)
 
             # valid terms
@@ -2542,7 +2429,8 @@ class TestHDFStore(Base):
                        major_axis=date_range('1/1/2000', periods=5),
                        minor_axis=['A', 'B', 'C', 'D'])
             store.append('wp',wp)
-            with tm.assert_produces_warning(expected_warning=DeprecationWarning):
+            with tm.assert_produces_warning(expected_warning=DeprecationWarning,
+                                            check_stacklevel=not compat.PY3):
                 result = store.select('wp', [('major_axis>20000102'),
                                              ('minor_axis', '=', ['A','B']) ])
             expected = wp.loc[:,wp.major_axis>Timestamp('20000102'),['A','B']]
@@ -2561,20 +2449,24 @@ class TestHDFStore(Base):
             store.append('wp',wp)
 
             # stringified datetimes
-            with tm.assert_produces_warning(expected_warning=DeprecationWarning):
+            with tm.assert_produces_warning(expected_warning=DeprecationWarning,
+                                            check_stacklevel=not compat.PY3):
                 result = store.select('wp', [('major_axis','>',datetime.datetime(2000,1,2))])
             expected = wp.loc[:,wp.major_axis>Timestamp('20000102')]
             assert_panel_equal(result, expected)
-            with tm.assert_produces_warning(expected_warning=DeprecationWarning):
+            with tm.assert_produces_warning(expected_warning=DeprecationWarning,
+                                            check_stacklevel=not compat.PY3):
                 result = store.select('wp', [('major_axis','>',datetime.datetime(2000,1,2,0,0))])
             expected = wp.loc[:,wp.major_axis>Timestamp('20000102')]
             assert_panel_equal(result, expected)
-            with tm.assert_produces_warning(expected_warning=DeprecationWarning):
+            with tm.assert_produces_warning(expected_warning=DeprecationWarning,
+                                            check_stacklevel=not compat.PY3):
                 result = store.select('wp', [('major_axis','=',[datetime.datetime(2000,1,2,0,0),
                                                                 datetime.datetime(2000,1,3,0,0)])])
             expected = wp.loc[:,[Timestamp('20000102'),Timestamp('20000103')]]
             assert_panel_equal(result, expected)
-            with tm.assert_produces_warning(expected_warning=DeprecationWarning):
+            with tm.assert_produces_warning(expected_warning=DeprecationWarning,
+                                            check_stacklevel=not compat.PY3):
                 result = store.select('wp', [('minor_axis','=',['A','B'])])
             expected = wp.loc[:,:,['A','B']]
             assert_panel_equal(result, expected)
@@ -2585,7 +2477,7 @@ class TestHDFStore(Base):
 
             import pandas as pd
             df  = DataFrame(np.random.randn(20, 2),index=pd.date_range('20130101',periods=20))
-            store.put('df', df, table=True)
+            store.put('df', df, format='table')
             expected = df[df.index>pd.Timestamp('20130105')]
 
             import datetime
@@ -2681,7 +2573,9 @@ class TestHDFStore(Base):
         idx = [(0., 1.), (2., 3.), (4., 5.)]
         data = np.random.randn(30).reshape((3, 10))
         DF = DataFrame(data, index=idx, columns=col)
-        with tm.assert_produces_warning(expected_warning=PerformanceWarning):
+
+        expected_warning = Warning if compat.PY35 else PerformanceWarning
+        with tm.assert_produces_warning(expected_warning=expected_warning, check_stacklevel=False):
             self._check_roundtrip(DF, tm.assert_frame_equal)
 
     def test_index_types(self):
@@ -2693,23 +2587,25 @@ class TestHDFStore(Base):
                                                    check_index_type=True,
                                                    check_series_type=True)
 
-        with tm.assert_produces_warning(expected_warning=PerformanceWarning):
+        # nose has a deprecation warning in 3.5
+        expected_warning = Warning if compat.PY35 else PerformanceWarning
+        with tm.assert_produces_warning(expected_warning=expected_warning, check_stacklevel=False):
             ser = Series(values, [0, 'y'])
             self._check_roundtrip(ser, func)
 
-        with tm.assert_produces_warning(expected_warning=PerformanceWarning):
+        with tm.assert_produces_warning(expected_warning=expected_warning, check_stacklevel=False):
             ser = Series(values, [datetime.datetime.today(), 0])
             self._check_roundtrip(ser, func)
 
-        with tm.assert_produces_warning(expected_warning=PerformanceWarning):
+        with tm.assert_produces_warning(expected_warning=expected_warning, check_stacklevel=False):
             ser = Series(values, ['y', 0])
             self._check_roundtrip(ser, func)
 
-        with tm.assert_produces_warning(expected_warning=PerformanceWarning):
+        with tm.assert_produces_warning(expected_warning=expected_warning, check_stacklevel=False):
             ser = Series(values, [datetime.date.today(), 'a'])
             self._check_roundtrip(ser, func)
 
-        with tm.assert_produces_warning(expected_warning=PerformanceWarning):
+        with tm.assert_produces_warning(expected_warning=expected_warning, check_stacklevel=False):
             ser = Series(values, [1.23, 'b'])
             self._check_roundtrip(ser, func)
 
@@ -2746,15 +2642,18 @@ class TestHDFStore(Base):
         self._check_roundtrip_table(df, tm.assert_frame_equal)
         self._check_roundtrip(df, tm.assert_frame_equal)
 
-        self._check_roundtrip_table(df, tm.assert_frame_equal,
-                                    compression=True)
-        self._check_roundtrip(df, tm.assert_frame_equal,
-                              compression=True)
+        if not skip_compression:
+            self._check_roundtrip_table(df, tm.assert_frame_equal,
+                                        compression=True)
+            self._check_roundtrip(df, tm.assert_frame_equal,
+                                  compression=True)
 
         tdf = tm.makeTimeDataFrame()
         self._check_roundtrip(tdf, tm.assert_frame_equal)
-        self._check_roundtrip(tdf, tm.assert_frame_equal,
-                              compression=True)
+
+        if not skip_compression:
+            self._check_roundtrip(tdf, tm.assert_frame_equal,
+                                  compression=True)
 
         with ensure_clean_store(self.path) as store:
             # not consolidated
@@ -2790,26 +2689,6 @@ class TestHDFStore(Base):
         frame = DataFrame(np.random.randn(len(rng), 4), index=rng)
 
         self._check_roundtrip(frame, tm.assert_frame_equal)
-
-    def test_timezones(self):
-        rng = date_range('1/1/2000', '1/30/2000', tz='US/Eastern')
-        frame = DataFrame(np.random.randn(len(rng), 4), index=rng)
-
-        with ensure_clean_store(self.path) as store:
-            store['frame'] = frame
-            recons = store['frame']
-            self.assertTrue(recons.index.equals(rng))
-            self.assertEqual(rng.tz, recons.index.tz)
-
-    def test_fixed_offset_tz(self):
-        rng = date_range('1/1/2000 00:00:00-07:00', '1/30/2000 00:00:00-07:00')
-        frame = DataFrame(np.random.randn(len(rng), 4), index=rng)
-
-        with ensure_clean_store(self.path) as store:
-            store['frame'] = frame
-            recons = store['frame']
-            self.assertTrue(recons.index.equals(rng))
-            self.assertEqual(rng.tz, recons.index.tz)
 
     def test_store_hierarchical(self):
         index = MultiIndex(levels=[['foo', 'bar', 'baz', 'qux'],
@@ -2877,15 +2756,15 @@ class TestHDFStore(Base):
         self._check_roundtrip(df1['bool1'], tm.assert_series_equal)
         self._check_roundtrip(df1['int1'], tm.assert_series_equal)
 
-        # try with compression
-        self._check_roundtrip(df1['obj1'], tm.assert_series_equal,
-                              compression=True)
-        self._check_roundtrip(df1['bool1'], tm.assert_series_equal,
-                              compression=True)
-        self._check_roundtrip(df1['int1'], tm.assert_series_equal,
-                              compression=True)
-        self._check_roundtrip(df1, tm.assert_frame_equal,
-                              compression=True)
+        if not skip_compression:
+            self._check_roundtrip(df1['obj1'], tm.assert_series_equal,
+                                  compression=True)
+            self._check_roundtrip(df1['bool1'], tm.assert_series_equal,
+                                  compression=True)
+            self._check_roundtrip(df1['int1'], tm.assert_series_equal,
+                                  compression=True)
+            self._check_roundtrip(df1, tm.assert_frame_equal,
+                                  compression=True)
 
     def test_wide(self):
 
@@ -3169,6 +3048,18 @@ class TestHDFStore(Base):
             store.append('df4',df,data_columns=True)
             result = store.select(
                 'df4', where='values>2.0')
+            tm.assert_frame_equal(expected, result)
+        
+        # test selection with comparison against numpy scalar
+        # GH 11283
+        with ensure_clean_store(self.path) as store:
+            df = tm.makeDataFrame()
+
+            expected = df[df['A']>0]
+
+            store.append('df', df, data_columns=True)
+            np_zero = np.float64(0)
+            result = store.select('df', where=["A>np_zero"])
             tm.assert_frame_equal(expected, result)
 
     def test_select_with_many_inputs(self):
@@ -3502,7 +3393,8 @@ class TestHDFStore(Base):
 
         with ensure_clean_path(self.path) as path:
 
-            with tm.assert_produces_warning(expected_warning=AttributeConflictWarning):
+            expected_warning = Warning if compat.PY35 else AttributeConflictWarning
+            with tm.assert_produces_warning(expected_warning=expected_warning, check_stacklevel=False):
 
                 df  = DataFrame(dict(A = Series(lrange(3), index=date_range('2000-1-1',periods=3,freq='H'))))
                 df.to_hdf(path,'data',mode='w',append=True)
@@ -3516,7 +3408,7 @@ class TestHDFStore(Base):
 
             self.assertEqual(read_hdf(path,'data').index.name, 'foo')
 
-            with tm.assert_produces_warning(expected_warning=AttributeConflictWarning):
+            with tm.assert_produces_warning(expected_warning=expected_warning, check_stacklevel=False):
 
                 idx2 = date_range('2001-1-1',periods=3,freq='H')
                 idx2.name = 'bar'
@@ -3586,7 +3478,7 @@ class TestHDFStore(Base):
         df.loc[df.index[0:4],'string'] = 'bar'
 
         with ensure_clean_store(self.path) as store:
-            store.put('df', df, table=True, data_columns=['string'])
+            store.put('df', df, format='table', data_columns=['string'])
 
             # empty
             result = store.select('df', 'index>df.index[3] & string="bar"')
@@ -3695,7 +3587,7 @@ class TestHDFStore(Base):
         df = tm.makeTimeDataFrame()
 
         with ensure_clean_store(self.path) as store:
-            store.put('df', df, table=True)
+            store.put('df', df, format='table')
 
             # not implemented
             self.assertRaises(NotImplementedError, store.select, 'df', "columns=['A'] | columns=['B']")
@@ -4210,35 +4102,25 @@ class TestHDFStore(Base):
 
     def test_pytables_native_read(self):
 
-        try:
-            store = HDFStore(tm.get_data_path('legacy_hdf/pytables_native.h5'), 'r')
+        with ensure_clean_store(tm.get_data_path('legacy_hdf/pytables_native.h5'), mode='r') as store:
             d2 = store['detector/readout']
-            assert isinstance(d2, DataFrame)
-        finally:
-            safe_close(store)
+            self.assertIsInstance(d2, DataFrame)
 
-        try:
-            store = HDFStore(tm.get_data_path('legacy_hdf/pytables_native2.h5'), 'r')
+        with ensure_clean_store(tm.get_data_path('legacy_hdf/pytables_native2.h5'), mode='r') as store:
             str(store)
             d1 = store['detector']
-            assert isinstance(d1, DataFrame)
-        finally:
-            safe_close(store)
+            self.assertIsInstance(d1, DataFrame)
 
     def test_legacy_read(self):
-        try:
-            store = HDFStore(tm.get_data_path('legacy_hdf/legacy.h5'), 'r')
+        with ensure_clean_store(tm.get_data_path('legacy_hdf/legacy.h5'), mode='r') as store:
             store['a']
             store['b']
             store['c']
             store['d']
-        finally:
-            safe_close(store)
 
     def test_legacy_table_read(self):
         # legacy table types
-        try:
-            store = HDFStore(tm.get_data_path('legacy_hdf/legacy_table.h5'), 'r')
+        with ensure_clean_store(tm.get_data_path('legacy_hdf/legacy_table.h5'), mode='r') as store:
             store.select('df1')
             store.select('df2')
             store.select('wp1')
@@ -4256,24 +4138,17 @@ class TestHDFStore(Base):
                 expected = df2[df2.index > df2.index[2]]
                 assert_frame_equal(expected, result)
 
-        finally:
-            safe_close(store)
-
     def test_legacy_0_10_read(self):
         # legacy from 0.10
-        try:
-            store = HDFStore(tm.get_data_path('legacy_hdf/legacy_0.10.h5'), 'r')
+        with ensure_clean_store(tm.get_data_path('legacy_hdf/legacy_0.10.h5'), mode='r') as store:
             str(store)
             for k in store.keys():
                 store.select(k)
-        finally:
-            safe_close(store)
 
     def test_legacy_0_11_read(self):
         # legacy from 0.11
-        try:
-            path = os.path.join('legacy_hdf', 'legacy_table_0.11.h5')
-            store = HDFStore(tm.get_data_path(path), 'r')
+        path = os.path.join('legacy_hdf', 'legacy_table_0.11.h5')
+        with ensure_clean_store(tm.get_data_path(path), mode='r') as store:
             str(store)
             assert 'df' in store
             assert 'df1' in store
@@ -4284,8 +4159,6 @@ class TestHDFStore(Base):
             assert isinstance(df, DataFrame)
             assert isinstance(df1, DataFrame)
             assert isinstance(mi, DataFrame)
-        finally:
-            safe_close(store)
 
     def test_copy(self):
 
@@ -4422,38 +4295,6 @@ class TestHDFStore(Base):
             self.assertEqual(type(result.index), type(df.index))
             self.assertEqual(result.index.freq, df.index.freq)
 
-    def test_tseries_select_index_column(self):
-        # GH7777
-        # selecting a UTC datetimeindex column did
-        # not preserve UTC tzinfo set before storing
-
-        # check that no tz still works
-        rng = date_range('1/1/2000', '1/30/2000')
-        frame = DataFrame(np.random.randn(len(rng), 4), index=rng)
-
-        with ensure_clean_store(self.path) as store:
-            store.append('frame', frame)
-            result = store.select_column('frame', 'index')
-            self.assertEqual(rng.tz, DatetimeIndex(result.values).tz)
-
-        # check utc
-        rng = date_range('1/1/2000', '1/30/2000', tz='UTC')
-        frame = DataFrame(np.random.randn(len(rng), 4), index=rng)
-
-        with ensure_clean_store(self.path) as store:
-            store.append('frame', frame)
-            result = store.select_column('frame', 'index')
-            self.assertEqual(rng.tz, DatetimeIndex(result.values).tz)
-
-        # double check non-utc
-        rng = date_range('1/1/2000', '1/30/2000', tz='US/Eastern')
-        frame = DataFrame(np.random.randn(len(rng), 4), index=rng)
-
-        with ensure_clean_store(self.path) as store:
-            store.append('frame', frame)
-            result = store.select_column('frame', 'index')
-            self.assertEqual(rng.tz, DatetimeIndex(result.values).tz)
-
     def test_unicode_index(self):
 
         unicode_values = [u('\u03c3'), u('\u03c3\u03c3')]
@@ -4461,7 +4302,23 @@ class TestHDFStore(Base):
             s = Series(np.random.randn(len(unicode_values)), unicode_values)
             self._check_roundtrip(s, tm.assert_series_equal)
 
-        compat_assert_produces_warning(PerformanceWarning,f)
+        compat_assert_produces_warning(PerformanceWarning, f)
+
+
+    def test_unicode_longer_encoded(self):
+        # GH 11234
+        char = '\u0394'
+        df = pd.DataFrame({'A': [char]})
+        with ensure_clean_store(self.path) as store:
+            store.put('df', df, format='table', encoding='utf-8')
+            result = store.get('df')
+            tm.assert_frame_equal(result, df)
+
+        df = pd.DataFrame({'A': ['a', char], 'B': ['b', 'b']})
+        with ensure_clean_store(self.path) as store:
+            store.put('df', df, format='table', encoding='utf-8')
+            result = store.get('df')
+            tm.assert_frame_equal(result, df)
 
     def test_store_datetime_mixed(self):
 
@@ -4508,16 +4365,19 @@ class TestHDFStore(Base):
         with ensure_clean_store(self.path) as store:
 
             # basic
+            _maybe_remove(store, 's')
             s = Series(Categorical(['a', 'b', 'b', 'a', 'a', 'c'], categories=['a','b','c','d'], ordered=False))
             store.append('s', s, format='table')
             result = store.select('s')
             tm.assert_series_equal(s, result)
 
+            _maybe_remove(store, 's_ordered')
             s = Series(Categorical(['a', 'b', 'b', 'a', 'a', 'c'], categories=['a','b','c','d'], ordered=True))
             store.append('s_ordered', s, format='table')
             result = store.select('s_ordered')
             tm.assert_series_equal(s, result)
 
+            _maybe_remove(store, 'df')
             df = DataFrame({"s":s, "vals":[1,2,3,4,5,6]})
             store.append('df', df, format='table')
             result = store.select('df')
@@ -4885,6 +4745,248 @@ class TestHDFComplexValues(Base):
             result = store.select('df')
             assert_frame_equal(pd.concat([df, df], 0), result)
 
+class TestTimezones(Base, tm.TestCase):
+
+
+    def _compare_with_tz(self, a, b):
+        tm.assert_frame_equal(a, b)
+
+        # compare the zones on each element
+        for c in a.columns:
+            for i in a.index:
+                a_e = a.loc[i,c]
+                b_e = b.loc[i,c]
+                if not (a_e == b_e and a_e.tz == b_e.tz):
+                    raise AssertionError("invalid tz comparsion [%s] [%s]" % (a_e, b_e))
+
+    def test_append_with_timezones_dateutil(self):
+
+        from datetime import timedelta
+        tm._skip_if_no_dateutil()
+
+        # use maybe_get_tz instead of dateutil.tz.gettz to handle the windows filename issues.
+        from pandas.tslib import maybe_get_tz
+        gettz = lambda x: maybe_get_tz('dateutil/' + x)
+
+        # as columns
+        with ensure_clean_store(self.path) as store:
+
+            _maybe_remove(store, 'df_tz')
+            df = DataFrame(dict(A=[ Timestamp('20130102 2:00:00', tz=gettz('US/Eastern')) + timedelta(hours=1) * i for i in range(5) ]))
+
+            store.append('df_tz', df, data_columns=['A'])
+            result = store['df_tz']
+            self._compare_with_tz(result, df)
+            assert_frame_equal(result, df)
+
+            # select with tz aware
+            expected = df[df.A >= df.A[3]]
+            result = store.select('df_tz', where=Term('A>=df.A[3]'))
+            self._compare_with_tz(result, expected)
+
+            # ensure we include dates in DST and STD time here.
+            _maybe_remove(store, 'df_tz')
+            df = DataFrame(dict(A=Timestamp('20130102', tz=gettz('US/Eastern')), B=Timestamp('20130603', tz=gettz('US/Eastern'))), index=range(5))
+            store.append('df_tz', df)
+            result = store['df_tz']
+            self._compare_with_tz(result, df)
+            assert_frame_equal(result, df)
+
+            df = DataFrame(dict(A=Timestamp('20130102', tz=gettz('US/Eastern')), B=Timestamp('20130102', tz=gettz('EET'))), index=range(5))
+            self.assertRaises(ValueError, store.append, 'df_tz', df)
+
+            # this is ok
+            _maybe_remove(store, 'df_tz')
+            store.append('df_tz', df, data_columns=['A', 'B'])
+            result = store['df_tz']
+            self._compare_with_tz(result, df)
+            assert_frame_equal(result, df)
+
+            # can't append with diff timezone
+            df = DataFrame(dict(A=Timestamp('20130102', tz=gettz('US/Eastern')), B=Timestamp('20130102', tz=gettz('CET'))), index=range(5))
+            self.assertRaises(ValueError, store.append, 'df_tz', df)
+
+        # as index
+        with ensure_clean_store(self.path) as store:
+
+            # GH 4098 example
+            df = DataFrame(dict(A=Series(lrange(3), index=date_range('2000-1-1', periods=3, freq='H', tz=gettz('US/Eastern')))))
+
+            _maybe_remove(store, 'df')
+            store.put('df', df)
+            result = store.select('df')
+            assert_frame_equal(result, df)
+
+            _maybe_remove(store, 'df')
+            store.append('df', df)
+            result = store.select('df')
+            assert_frame_equal(result, df)
+
+    def test_append_with_timezones_pytz(self):
+
+        from datetime import timedelta
+
+        # as columns
+        with ensure_clean_store(self.path) as store:
+
+            _maybe_remove(store, 'df_tz')
+            df = DataFrame(dict(A = [ Timestamp('20130102 2:00:00',tz='US/Eastern') + timedelta(hours=1)*i for i in range(5) ]))
+            store.append('df_tz',df,data_columns=['A'])
+            result = store['df_tz']
+            self._compare_with_tz(result,df)
+            assert_frame_equal(result,df)
+
+            # select with tz aware
+            self._compare_with_tz(store.select('df_tz',where=Term('A>=df.A[3]')),df[df.A>=df.A[3]])
+
+            _maybe_remove(store, 'df_tz')
+            # ensure we include dates in DST and STD time here.
+            df = DataFrame(dict(A = Timestamp('20130102',tz='US/Eastern'), B = Timestamp('20130603',tz='US/Eastern')),index=range(5))
+            store.append('df_tz',df)
+            result = store['df_tz']
+            self._compare_with_tz(result,df)
+            assert_frame_equal(result,df)
+
+            df = DataFrame(dict(A = Timestamp('20130102',tz='US/Eastern'), B = Timestamp('20130102',tz='EET')),index=range(5))
+            self.assertRaises(ValueError, store.append, 'df_tz', df)
+
+            # this is ok
+            _maybe_remove(store, 'df_tz')
+            store.append('df_tz',df,data_columns=['A','B'])
+            result = store['df_tz']
+            self._compare_with_tz(result,df)
+            assert_frame_equal(result,df)
+
+            # can't append with diff timezone
+            df = DataFrame(dict(A = Timestamp('20130102',tz='US/Eastern'), B = Timestamp('20130102',tz='CET')),index=range(5))
+            self.assertRaises(ValueError, store.append, 'df_tz', df)
+
+        # as index
+        with ensure_clean_store(self.path) as store:
+
+            # GH 4098 example
+            df = DataFrame(dict(A = Series(lrange(3), index=date_range('2000-1-1',periods=3,freq='H', tz='US/Eastern'))))
+
+            _maybe_remove(store, 'df')
+            store.put('df',df)
+            result = store.select('df')
+            assert_frame_equal(result,df)
+
+            _maybe_remove(store, 'df')
+            store.append('df',df)
+            result = store.select('df')
+            assert_frame_equal(result,df)
+
+    def test_tseries_select_index_column(self):
+        # GH7777
+        # selecting a UTC datetimeindex column did
+        # not preserve UTC tzinfo set before storing
+
+        # check that no tz still works
+        rng = date_range('1/1/2000', '1/30/2000')
+        frame = DataFrame(np.random.randn(len(rng), 4), index=rng)
+
+        with ensure_clean_store(self.path) as store:
+            store.append('frame', frame)
+            result = store.select_column('frame', 'index')
+            self.assertEqual(rng.tz, DatetimeIndex(result.values).tz)
+
+        # check utc
+        rng = date_range('1/1/2000', '1/30/2000', tz='UTC')
+        frame = DataFrame(np.random.randn(len(rng), 4), index=rng)
+
+        with ensure_clean_store(self.path) as store:
+            store.append('frame', frame)
+            result = store.select_column('frame', 'index')
+            self.assertEqual(rng.tz, result.dt.tz)
+
+        # double check non-utc
+        rng = date_range('1/1/2000', '1/30/2000', tz='US/Eastern')
+        frame = DataFrame(np.random.randn(len(rng), 4), index=rng)
+
+        with ensure_clean_store(self.path) as store:
+            store.append('frame', frame)
+            result = store.select_column('frame', 'index')
+            self.assertEqual(rng.tz, result.dt.tz)
+
+    def test_timezones(self):
+        rng = date_range('1/1/2000', '1/30/2000', tz='US/Eastern')
+        frame = DataFrame(np.random.randn(len(rng), 4), index=rng)
+
+        with ensure_clean_store(self.path) as store:
+            store['frame'] = frame
+            recons = store['frame']
+            self.assertTrue(recons.index.equals(rng))
+            self.assertEqual(rng.tz, recons.index.tz)
+
+    def test_fixed_offset_tz(self):
+        rng = date_range('1/1/2000 00:00:00-07:00', '1/30/2000 00:00:00-07:00')
+        frame = DataFrame(np.random.randn(len(rng), 4), index=rng)
+
+        with ensure_clean_store(self.path) as store:
+            store['frame'] = frame
+            recons = store['frame']
+            self.assertTrue(recons.index.equals(rng))
+            self.assertEqual(rng.tz, recons.index.tz)
+
+    def test_store_timezone(self):
+        # GH2852
+        # issue storing datetime.date with a timezone as it resets when read back in a new timezone
+
+        import platform
+        if platform.system() == "Windows":
+            raise nose.SkipTest("timezone setting not supported on windows")
+
+        import datetime
+        import time
+        import os
+
+        # original method
+        with ensure_clean_store(self.path) as store:
+
+            today = datetime.date(2013,9,10)
+            df = DataFrame([1,2,3], index = [today, today, today])
+            store['obj1'] = df
+            result = store['obj1']
+            assert_frame_equal(result, df)
+
+        # with tz setting
+        orig_tz = os.environ.get('TZ')
+
+        def setTZ(tz):
+            if tz is None:
+                try:
+                    del os.environ['TZ']
+                except:
+                    pass
+            else:
+                os.environ['TZ']=tz
+                time.tzset()
+
+        try:
+
+            with ensure_clean_store(self.path) as store:
+
+                setTZ('EST5EDT')
+                today = datetime.date(2013,9,10)
+                df = DataFrame([1,2,3], index = [today, today, today])
+                store['obj1'] = df
+
+                setTZ('CST6CDT')
+                result = store['obj1']
+
+                assert_frame_equal(result, df)
+
+        finally:
+            setTZ(orig_tz)
+
+    def test_legacy_datetimetz_object(self):
+        # legacy from < 0.17.0
+        # 8260
+        expected = DataFrame(dict(A=Timestamp('20130102', tz='US/Eastern'), B=Timestamp('20130603', tz='CET')), index=range(5))
+        with ensure_clean_store(tm.get_data_path('legacy_hdf/datetimetz_object.h5'), mode='r') as store:
+            result = store['df']
+            assert_frame_equal(result, expected)
 
 def _test_sort(obj):
     if isinstance(obj, DataFrame):

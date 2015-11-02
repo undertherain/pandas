@@ -652,10 +652,10 @@ class TestArrayToDatetime(tm.TestCase):
         # These strings don't look like datetimes so they shouldn't be
         # attempted to be converted
         arr = np.array(['-352.737091', '183.575577'], dtype=object)
-        self.assert_numpy_array_equal(tslib.array_to_datetime(arr), arr)
+        self.assert_numpy_array_equal(tslib.array_to_datetime(arr, errors='ignore'), arr)
 
         arr = np.array(['1', '2', '3', '4', '5'], dtype=object)
-        self.assert_numpy_array_equal(tslib.array_to_datetime(arr), arr)
+        self.assert_numpy_array_equal(tslib.array_to_datetime(arr, errors='ignore'), arr)
 
     def test_coercing_dates_outside_of_datetime64_ns_bounds(self):
         invalid_dates = [
@@ -671,13 +671,12 @@ class TestArrayToDatetime(tm.TestCase):
                 ValueError,
                 tslib.array_to_datetime,
                 np.array([invalid_date], dtype='object'),
-                coerce=False,
-                raise_=True,
+                errors='raise',
             )
             self.assertTrue(
                 np.array_equal(
                     tslib.array_to_datetime(
-                        np.array([invalid_date], dtype='object'), coerce=True
+                        np.array([invalid_date], dtype='object'), errors='coerce',
                     ),
                     np.array([tslib.iNaT], dtype='M8[ns]')
                 )
@@ -685,7 +684,7 @@ class TestArrayToDatetime(tm.TestCase):
 
         arr = np.array(['1/1/1000', '1/1/2000'], dtype=object)
         self.assert_numpy_array_equal(
-            tslib.array_to_datetime(arr, coerce=True),
+            tslib.array_to_datetime(arr, errors='coerce'),
             np.array(
                     [
                         tslib.iNaT,
@@ -700,11 +699,11 @@ class TestArrayToDatetime(tm.TestCase):
 
         # Without coercing, the presence of any invalid dates prevents
         # any values from being converted
-        self.assert_numpy_array_equal(tslib.array_to_datetime(arr), arr)
+        self.assert_numpy_array_equal(tslib.array_to_datetime(arr,errors='ignore'), arr)
 
         # With coercing, the invalid dates becomes iNaT
         self.assert_numpy_array_equal(
-            tslib.array_to_datetime(arr, coerce=True),
+            tslib.array_to_datetime(arr, errors='coerce'),
             np.array(
                     [
                         '2013-01-01T00:00:00.000000000-0000',
@@ -879,7 +878,7 @@ class TestTslib(tm.TestCase):
 
     def test_period_ordinal_start_values(self):
         # information for 1.1.1970
-        self.assertEqual(0, period_ordinal(1970, 1, 1, 0, 0, 0, 0, 0, get_freq('Y')))
+        self.assertEqual(0, period_ordinal(1970, 1, 1, 0, 0, 0, 0, 0, get_freq('A')))
         self.assertEqual(0, period_ordinal(1970, 1, 1, 0, 0, 0, 0, 0, get_freq('M')))
         self.assertEqual(1, period_ordinal(1970, 1, 1, 0, 0, 0, 0, 0, get_freq('W')))
         self.assertEqual(0, period_ordinal(1970, 1, 1, 0, 0, 0, 0, 0, get_freq('D')))
@@ -943,6 +942,23 @@ class TestTslib(tm.TestCase):
                                   tslib.maybe_get_tz('US/Eastern'),
                                   tslib.maybe_get_tz('Asia/Tokyo'))
         self.assert_numpy_array_equal(result, np.array([], dtype=np.int64))
+
+        # Check all-NaT array
+        result = tslib.tz_convert(np.array([tslib.iNaT], dtype=np.int64),
+                                  tslib.maybe_get_tz('US/Eastern'),
+                                  tslib.maybe_get_tz('Asia/Tokyo'))
+        self.assert_numpy_array_equal(result, np.array([tslib.iNaT], dtype=np.int64))
+
+    def test_shift_months(self):
+        s = DatetimeIndex([Timestamp('2000-01-05 00:15:00'), Timestamp('2000-01-31 00:23:00'),
+                           Timestamp('2000-01-01'), Timestamp('2000-02-29'), Timestamp('2000-12-31')])
+        for years in [-1, 0, 1]:
+            for months in [-2, 0, 2]:
+                actual = DatetimeIndex(tslib.shift_months(s.asi8, years * 12 + months))
+                expected = DatetimeIndex([x + offsets.DateOffset(years=years, months=months) for x in s])
+                tm.assert_index_equal(actual, expected)
+
+
 
 class TestTimestampOps(tm.TestCase):
     def test_timestamp_and_datetime(self):

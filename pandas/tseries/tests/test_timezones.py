@@ -17,7 +17,7 @@ import pandas.tseries.tools as tools
 from pytz import NonExistentTimeError
 
 import pandas.util.testing as tm
-
+from pandas.core.dtypes import DatetimeTZDtype
 from pandas.util.testing import assert_frame_equal
 from pandas.compat import lrange, zip
 
@@ -438,7 +438,8 @@ class TestTimeZoneSupportPytz(tm.TestCase):
         di = DatetimeIndex(times)
         localized = di.tz_localize(tz, ambiguous='infer')
         self.assert_numpy_array_equal(dr, localized)
-        localized_old = di.tz_localize(tz, infer_dst=True)
+        with tm.assert_produces_warning(FutureWarning):
+            localized_old = di.tz_localize(tz, infer_dst=True)
         self.assert_numpy_array_equal(dr, localized_old)
         self.assert_numpy_array_equal(dr, DatetimeIndex(times, tz=tz, ambiguous='infer'))
 
@@ -448,7 +449,8 @@ class TestTimeZoneSupportPytz(tm.TestCase):
         localized = dr.tz_localize(tz)
         localized_infer = dr.tz_localize(tz, ambiguous='infer')
         self.assert_numpy_array_equal(localized, localized_infer)
-        localized_infer_old = dr.tz_localize(tz, infer_dst=True)
+        with tm.assert_produces_warning(FutureWarning):
+            localized_infer_old = dr.tz_localize(tz, infer_dst=True)
         self.assert_numpy_array_equal(localized, localized_infer_old)
 
     def test_ambiguous_flags(self):
@@ -667,7 +669,8 @@ class TestTimeZoneSupportPytz(tm.TestCase):
         dr = date_range('2011/1/1', '2012/1/1', freq='W-FRI')
         dr_tz = dr.tz_localize(self.tzstr('US/Eastern'))
         e = DataFrame({'A': 'foo', 'B': dr_tz}, index=dr)
-        self.assertEqual(e['B'].dtype, 'O')
+        tz_expected = DatetimeTZDtype('ns',dr_tz.tzinfo)
+        self.assertEqual(e['B'].dtype, tz_expected)
 
         # GH 2810 (with timezones)
         datetimes_naive   = [ ts.to_pydatetime() for ts in dr ]
@@ -675,8 +678,8 @@ class TestTimeZoneSupportPytz(tm.TestCase):
         df = DataFrame({'dr' : dr, 'dr_tz' : dr_tz,
                         'datetimes_naive': datetimes_naive,
                         'datetimes_with_tz' : datetimes_with_tz })
-        result = df.get_dtype_counts()
-        expected = Series({ 'datetime64[ns]' : 2, 'object' : 2 })
+        result = df.get_dtype_counts().sort_index()
+        expected = Series({ 'datetime64[ns]' : 2, str(tz_expected) : 2 }).sort_index()
         tm.assert_series_equal(result, expected)
 
     def test_hongkong_tz_convert(self):

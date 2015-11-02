@@ -5,6 +5,9 @@
   <td>Latest Release</td>
   <td><img src="https://img.shields.io/pypi/v/pandas.svg" alt="latest release" /></td>
 </tr>
+  <td></td>
+  <td><img src="https://anaconda.org/pandas/pandas/badges/version.svg" alt="latest release" /></td>
+</tr>
 <tr>
   <td>Package Status</td>
   <td><img src="https://img.shields.io/pypi/status/pandas.svg" alt="status" /></td>
@@ -221,7 +224,7 @@ cloning the git repo), execute:
 python setup.py install
 ```
 
-or for installing in [development mode](http://www.pip-installer.org/en/latest/usage.html):
+or for installing in [development mode](https://pip.pypa.io/en/latest/reference/pip_install.html#editable-installs):
 
 ```sh
 python setup.py develop
@@ -229,7 +232,7 @@ python setup.py develop
 
 Alternatively, you can use `pip` if you want all the dependencies pulled
 in automatically (the `-e` option is for installing it in [development
-mode](http://www.pip-installer.org/en/latest/usage.html)):
+mode](https://pip.pypa.io/en/latest/reference/pip_install.html#editable-installs)):
 
 ```sh
 pip install -e .

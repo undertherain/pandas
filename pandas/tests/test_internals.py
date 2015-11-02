@@ -6,10 +6,14 @@ from datetime import datetime, date
 import nose
 import numpy as np
 
-from pandas import Index, MultiIndex, DataFrame, Series, Categorical
+import re
+import itertools
+from pandas import Index, MultiIndex, DataFrame, DatetimeIndex, Series, Categorical
 from pandas.compat import OrderedDict, lrange
 from pandas.sparse.array import SparseArray
-from pandas.core.internals import *
+from pandas.core.internals import (BlockPlacement, SingleBlockManager, make_block,
+                                   BlockManager)
+import pandas.core.common as com
 import pandas.core.internals as internals
 import pandas.util.testing as tm
 import pandas as pd
@@ -44,7 +48,7 @@ def create_block(typestr, placement, item_shape=None, num_offset=0):
         * complex, c16, c8
         * bool
         * object, string, O
-        * datetime, dt, M8[ns]
+        * datetime, dt, M8[ns], M8[ns, tz]
         * timedelta, td, m8[ns]
         * sparse (SparseArray with fill_value=0.0)
         * sparse_na (SparseArray with fill_value=np.nan)
@@ -74,6 +78,13 @@ def create_block(typestr, placement, item_shape=None, num_offset=0):
         values = np.ones(shape, dtype=np.bool_)
     elif typestr in ('datetime', 'dt', 'M8[ns]'):
         values = (mat * 1e9).astype('M8[ns]')
+    elif typestr.startswith('M8[ns'):
+        # datetime with tz
+        m = re.search('M8\[ns,\s*(\w+\/?\w*)\]', typestr)
+        assert m is not None, "incompatible typestr -> {0}".format(typestr)
+        tz = m.groups()[0]
+        assert num_items == 1, "must have only 1 num items for a tz-aware"
+        values = DatetimeIndex(np.arange(N) * 1e9, tz=tz)
     elif typestr in ('timedelta', 'td', 'm8[ns]'):
         values = (mat * 1).astype('m8[ns]')
     elif typestr in ('category',):
@@ -295,7 +306,7 @@ class TestDatetimeBlock(tm.TestCase):
         block = create_block('datetime', [0])
 
         # coerce None
-        none_coerced = block._try_coerce_args(block.values, None)[1]
+        none_coerced = block._try_coerce_args(block.values, None)[2]
         self.assertTrue(pd.Timestamp(none_coerced) is pd.NaT)
 
         # coerce different types of date bojects
@@ -303,7 +314,7 @@ class TestDatetimeBlock(tm.TestCase):
                 datetime(2010, 10, 10),
                 date(2010, 10, 10))
         for val in vals:
-            coerced = block._try_coerce_args(block.values, val)[1]
+            coerced = block._try_coerce_args(block.values, val)[2]
             self.assertEqual(np.int64, type(coerced))
             self.assertEqual(pd.Timestamp('2010-10-10'), pd.Timestamp(coerced))
 
@@ -401,7 +412,7 @@ class TestBlockManager(tm.TestCase):
                 res = self.mgr.get_scalar((item, index))
                 exp = self.mgr.get(item, fastpath=False)[i]
                 assert_almost_equal(res, exp)
-                exp = self.mgr.get(item).values[i]
+                exp = self.mgr.get(item).internal_values()[i]
                 assert_almost_equal(res, exp)
 
     def test_get(self):
@@ -414,19 +425,19 @@ class TestBlockManager(tm.TestCase):
         assert_almost_equal(mgr.get('a', fastpath=False), values[0])
         assert_almost_equal(mgr.get('b', fastpath=False), values[1])
         assert_almost_equal(mgr.get('c', fastpath=False), values[2])
-        assert_almost_equal(mgr.get('a').values, values[0])
-        assert_almost_equal(mgr.get('b').values, values[1])
-        assert_almost_equal(mgr.get('c').values, values[2])
+        assert_almost_equal(mgr.get('a').internal_values(), values[0])
+        assert_almost_equal(mgr.get('b').internal_values(), values[1])
+        assert_almost_equal(mgr.get('c').internal_values(), values[2])
 
     def test_set(self):
         mgr = create_mgr('a,b,c: int', item_shape=(3,))
 
         mgr.set('d', np.array(['foo'] * 3))
         mgr.set('b', np.array(['bar'] * 3))
-        assert_almost_equal(mgr.get('a').values, [0] * 3)
-        assert_almost_equal(mgr.get('b').values, ['bar'] * 3)
-        assert_almost_equal(mgr.get('c').values, [2] * 3)
-        assert_almost_equal(mgr.get('d').values, ['foo'] * 3)
+        assert_almost_equal(mgr.get('a').internal_values(), [0] * 3)
+        assert_almost_equal(mgr.get('b').internal_values(), ['bar'] * 3)
+        assert_almost_equal(mgr.get('c').internal_values(), [2] * 3)
+        assert_almost_equal(mgr.get('d').internal_values(), ['foo'] * 3)
 
     def test_insert(self):
         self.mgr.insert(0, 'inserted', np.arange(N))
@@ -478,7 +489,6 @@ class TestBlockManager(tm.TestCase):
 
     def test_sparse(self):
         mgr = create_mgr('a: sparse-1; b: sparse-2')
-
         # what to test here?
         self.assertEqual(mgr.as_matrix().dtype, np.float64)
 
@@ -509,6 +519,12 @@ class TestBlockManager(tm.TestCase):
     def test_as_matrix_datetime(self):
         mgr = create_mgr('h: datetime-1; g: datetime-2')
         self.assertEqual(mgr.as_matrix().dtype, 'M8[ns]')
+
+    def test_as_matrix_datetime_tz(self):
+        mgr = create_mgr('h: M8[ns, US/Eastern]; g: M8[ns, CET]')
+        self.assertEqual(mgr.get('h').dtype, 'datetime64[ns, US/Eastern]')
+        self.assertEqual(mgr.get('g').dtype, 'datetime64[ns, CET]')
+        self.assertEqual(mgr.as_matrix().dtype, 'object')
 
     def test_astype(self):
         # coerce all
@@ -651,8 +667,8 @@ class TestBlockManager(tm.TestCase):
 
     def test_interleave_non_unique_cols(self):
         df = DataFrame([
-            [Timestamp('20130101'), 3.5],
-            [Timestamp('20130102'), 4.5]],
+            [pd.Timestamp('20130101'), 3.5],
+            [pd.Timestamp('20130102'), 4.5]],
             columns=['x', 'x'],
             index=[1, 2])
 
@@ -692,10 +708,10 @@ class TestBlockManager(tm.TestCase):
         assert_almost_equal(mgr.get('c',fastpath=False), reindexed.get('c',fastpath=False))
         assert_almost_equal(mgr.get('a',fastpath=False), reindexed.get('a',fastpath=False))
         assert_almost_equal(mgr.get('d',fastpath=False), reindexed.get('d',fastpath=False))
-        assert_almost_equal(mgr.get('g').values, reindexed.get('g').values)
-        assert_almost_equal(mgr.get('c').values, reindexed.get('c').values)
-        assert_almost_equal(mgr.get('a').values, reindexed.get('a').values)
-        assert_almost_equal(mgr.get('d').values, reindexed.get('d').values)
+        assert_almost_equal(mgr.get('g').internal_values(), reindexed.get('g').internal_values())
+        assert_almost_equal(mgr.get('c').internal_values(), reindexed.get('c').internal_values())
+        assert_almost_equal(mgr.get('a').internal_values(), reindexed.get('a').internal_values())
+        assert_almost_equal(mgr.get('d').internal_values(), reindexed.get('d').internal_values())
 
     def test_multiindex_xs(self):
         mgr = create_mgr('a,b,c: f8; d,e,f: i8')
@@ -721,18 +737,18 @@ class TestBlockManager(tm.TestCase):
         numeric = mgr.get_numeric_data()
         assert_almost_equal(numeric.items, ['int', 'float', 'complex', 'bool'])
         assert_almost_equal(mgr.get('float',fastpath=False), numeric.get('float',fastpath=False))
-        assert_almost_equal(mgr.get('float').values, numeric.get('float').values)
+        assert_almost_equal(mgr.get('float').internal_values(), numeric.get('float').internal_values())
 
         # Check sharing
         numeric.set('float', np.array([100., 200., 300.]))
         assert_almost_equal(mgr.get('float',fastpath=False), np.array([100., 200., 300.]))
-        assert_almost_equal(mgr.get('float').values, np.array([100., 200., 300.]))
+        assert_almost_equal(mgr.get('float').internal_values(), np.array([100., 200., 300.]))
 
         numeric2 = mgr.get_numeric_data(copy=True)
         assert_almost_equal(numeric.items, ['int', 'float', 'complex', 'bool'])
         numeric2.set('float', np.array([1000., 2000., 3000.]))
         assert_almost_equal(mgr.get('float',fastpath=False), np.array([100., 200., 300.]))
-        assert_almost_equal(mgr.get('float').values, np.array([100., 200., 300.]))
+        assert_almost_equal(mgr.get('float').internal_values(), np.array([100., 200., 300.]))
 
     def test_get_bool_data(self):
         mgr = create_mgr('int: int; float: float; complex: complex;'
@@ -743,17 +759,17 @@ class TestBlockManager(tm.TestCase):
         bools = mgr.get_bool_data()
         assert_almost_equal(bools.items, ['bool'])
         assert_almost_equal(mgr.get('bool',fastpath=False), bools.get('bool',fastpath=False))
-        assert_almost_equal(mgr.get('bool').values, bools.get('bool').values)
+        assert_almost_equal(mgr.get('bool').internal_values(), bools.get('bool').internal_values())
 
         bools.set('bool', np.array([True, False, True]))
         assert_almost_equal(mgr.get('bool',fastpath=False), [True, False, True])
-        assert_almost_equal(mgr.get('bool').values, [True, False, True])
+        assert_almost_equal(mgr.get('bool').internal_values(), [True, False, True])
 
         # Check sharing
         bools2 = mgr.get_bool_data(copy=True)
         bools2.set('bool', np.array([False, True, False]))
         assert_almost_equal(mgr.get('bool',fastpath=False), [True, False, True])
-        assert_almost_equal(mgr.get('bool').values, [True, False, True])
+        assert_almost_equal(mgr.get('bool').internal_values(), [True, False, True])
 
     def test_unicode_repr_doesnt_raise(self):
         str_repr = repr(create_mgr(u('b,\u05d0: object')))

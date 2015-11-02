@@ -17,7 +17,8 @@ import pandas.core.common as com
 from pandas.core.common import AbstractMethodError
 from pandas.core.config import get_option
 from pandas.io.date_converters import generic_parser
-from pandas.io.common import get_filepath_or_buffer
+from pandas.io.common import (get_filepath_or_buffer, _validate_header_arg,
+                              _get_handle, UnicodeReader, UTF8Recoder)
 from pandas.tseries import tools
 
 from pandas.util.decorators import Appender
@@ -54,7 +55,7 @@ skipinitialspace : boolean, default False
     Skip spaces after delimiter
 escapechar : string (length 1), default None
     One-character string used to escape delimiter when quoting is QUOTE_NONE.
-dtype : Type name or dict of column -> type
+dtype : Type name or dict of column -> type, default None
     Data type for data or columns. E.g. {'a': np.float64, 'b': np.int32}
     (Unsupported with engine='python')
 compression : {'gzip', 'bz2', 'infer', None}, default 'infer'
@@ -65,7 +66,7 @@ compression : {'gzip', 'bz2', 'infer', None}, default 'infer'
 dialect : string or csv.Dialect instance, default None
     If None defaults to Excel dialect. Ignored if sep longer than 1 char
     See csv.Dialect documentation for more details
-header : int, list of ints
+header : int, list of ints, default 'infer'
     Row number(s) to use as the column names, and the start of the
     data.  Defaults to 0 if no ``names`` passed, otherwise ``None``. Explicitly
     pass ``header=0`` to be able to replace existing names. The header can be
@@ -74,7 +75,7 @@ header : int, list of ints
     skipped (e.g. 2 in this example are skipped). Note that this parameter
     ignores commented lines and empty lines if ``skip_blank_lines=True``, so header=0
     denotes the first line of data rather than the first line of the file.
-skiprows : list-like or integer
+skiprows : list-like or integer, default None
     Line numbers to skip (0-indexed) or number of lines to skip (int)
     at the start of the file
 index_col : int or sequence or False, default None
@@ -82,7 +83,7 @@ index_col : int or sequence or False, default None
     MultiIndex is used. If you have a malformed file with delimiters at the end
     of each line, you might consider index_col=False to force pandas to _not_
     use the first column as the index (row names)
-names : array-like
+names : array-like, default None
     List of column names to use. If file contains no header row, then you
     should explicitly pass header=None
 prefix : string, default None
@@ -90,14 +91,14 @@ prefix : string, default None
 na_values : str, list-like or dict, default None
     Additional strings to recognize as NA/NaN. If dict passed, specific
     per-column NA values
-true_values : list
+true_values : list, default None
     Values to consider as True
-false_values : list
+false_values : list, default None
     Values to consider as False
 keep_default_na : bool, default True
     If na_values are specified and keep_default_na is False the default NaN
     values are overridden, otherwise they're appended to
-parse_dates : boolean, list of ints or names, list of lists, or dict
+parse_dates : boolean, list of ints or names, list of lists, or dict, default False
     If True -> try parsing the index.
     If [1, 2, 3] -> try parsing columns 1, 2, 3 each as a separate date column.
     If [[1, 3]] -> combine columns 1 and 3 and parse as a single date column.
@@ -106,7 +107,7 @@ parse_dates : boolean, list of ints or names, list of lists, or dict
 keep_date_col : boolean, default False
     If True and parse_dates specifies combining multiple columns then
     keep the original columns.
-date_parser : function
+date_parser : function, default None
     Function to use for converting a sequence of string columns to an
     array of datetime instances. The default uses dateutil.parser.parser
     to do the conversion. Pandas will try to call date_parser in three different
@@ -154,7 +155,7 @@ na_filter : boolean, default True
     Detect missing value markers (empty strings and the value of na_values). In
     data without any NAs, passing na_filter=False can improve the performance
     of reading a large file
-usecols : array-like
+usecols : array-like, default None
     Return a subset of the columns.
     Results in much faster parsing time and lower memory usage.
 mangle_dupe_cols : boolean, default True
@@ -235,10 +236,25 @@ def _read(filepath_or_buffer, kwds):
     if skipfooter is not None:
         kwds['skip_footer'] = skipfooter
 
+    # If the input could be a filename, check for a recognizable compression extension.
+    # If we're reading from a URL, the `get_filepath_or_buffer` will use header info
+    # to determine compression, so use what it finds in that case.
+    inferred_compression = kwds.get('compression')
+    if inferred_compression == 'infer':
+        if isinstance(filepath_or_buffer, compat.string_types):
+            if filepath_or_buffer.endswith('.gz'):
+                inferred_compression = 'gzip'
+            elif filepath_or_buffer.endswith('.bz2'):
+                inferred_compression = 'bz2'
+            else:
+                inferred_compression = None
+        else:
+            inferred_compression = None
+
     filepath_or_buffer, _, compression = get_filepath_or_buffer(filepath_or_buffer,
                                                                 encoding,
                                                                 compression=kwds.get('compression', None))
-    kwds['compression'] = compression
+    kwds['compression'] = inferred_compression if compression == 'infer' else compression
 
     if kwds.get('date_parser', None) is not None:
         if isinstance(kwds['parse_dates'], bool):
@@ -301,7 +317,7 @@ _parser_defaults = {
     'verbose': False,
     'encoding': None,
     'squeeze': False,
-    'compression': 'infer',
+    'compression': None,
     'mangle_dupe_cols': True,
     'tupleize_cols': False,
     'infer_datetime_format': False,
@@ -647,7 +663,7 @@ class TextFileReader(object):
             warnings.warn(("Falling back to the 'python' engine because"
                            " {0}; you can avoid this warning by specifying"
                            " engine='python'.").format(fallback_reason),
-                          ParserWarning)
+                          ParserWarning, stacklevel=5)
 
         index_col = options['index_col']
         names = options['names']
@@ -657,6 +673,8 @@ class TextFileReader(object):
 
         # really delete this one
         keep_default_na = result.pop('keep_default_na')
+
+        _validate_header_arg(options['header'])
 
         if index_col is True:
             raise ValueError("The value of index_col couldn't be 'True'")
@@ -802,6 +820,8 @@ class ParserBase(object):
 
         self._name_processed = False
 
+        self._first_chunk = True
+
     @property
     def _has_complex_date_col(self):
         return (isinstance(self.parse_dates, dict) or
@@ -853,10 +873,13 @@ class ParserBase(object):
         columns = lzip(*[extract(r) for r in header])
         names = ic + columns
 
+        def tostr(x):
+            return str(x) if not isinstance(x, compat.string_types) else x
+
         # if we find 'Unnamed' all of a single level, then our header was too
         # long
         for n in range(len(columns[0])):
-            if all(['Unnamed' in c[n] for c in columns]):
+            if all(['Unnamed' in tostr(c[n]) for c in columns]):
                 raise _parser.CParserError(
                     "Passed header=[%s] are too many rows for this "
                     "multi_index of columns"
@@ -1065,7 +1088,7 @@ class CParserWrapper(ParserBase):
         if 'utf-16' in (kwds.get('encoding') or ''):
             if isinstance(src, compat.string_types):
                 src = open(src, 'rb')
-            src = com.UTF8Recoder(src, kwds['encoding'])
+            src = UTF8Recoder(src, kwds['encoding'])
             kwds['encoding'] = 'utf-8'
 
         # #2442
@@ -1164,20 +1187,24 @@ class CParserWrapper(ParserBase):
         self._reader.set_error_bad_lines(int(status))
 
     def read(self, nrows=None):
-        if self.as_recarray:
-            # what to do if there are leading columns?
-            return self._reader.read(nrows)
-
         try:
             data = self._reader.read(nrows)
         except StopIteration:
-            if nrows is None:
+            if self._first_chunk:
+                self._first_chunk = False
                 return _get_empty_meta(self.orig_names,
                                        self.index_col,
                                        self.index_names,
                                        dtype=self.kwds.get('dtype'))
             else:
                 raise
+
+        # Done with first read, next time raise StopIteration
+        self._first_chunk = False
+
+        if self.as_recarray:
+            # what to do if there are leading columns?
+            return data
 
         names = self.names
 
@@ -1338,12 +1365,13 @@ def _wrap_compressed(f, compression, encoding=None):
     elif compression == 'bz2':
         import bz2
 
-        # bz2 module can't take file objects, so have to run through decompress
-        # manually
-        data = bz2.decompress(f.read())
         if compat.PY3:
-            data = data.decode(encoding)
-        f = StringIO(data)
+            f = bz2.open(f, 'rt', encoding=encoding)
+        else:
+            # Python 2's bz2 module can't take file objects, so have to
+            # run through decompress manually
+            data = bz2.decompress(f.read())
+            f = StringIO(data)
         return f
     else:
         raise ValueError('do not recognize compression method %s'
@@ -1395,19 +1423,8 @@ class PythonParser(ParserBase):
         self.comment = kwds['comment']
         self._comment_lines = []
 
-        if self.compression == 'infer':
-            if isinstance(f, compat.string_types):
-                if f.endswith('.gz'):
-                    self.compression = 'gzip'
-                elif f.endswith('.bz2'):
-                    self.compression = 'bz2'
-                else:
-                    self.compression = None
-            else:
-                self.compression = None
-
         if isinstance(f, compat.string_types):
-            f = com._get_handle(f, 'r', encoding=self.encoding,
+            f = _get_handle(f, 'r', encoding=self.encoding,
                                 compression=self.compression)
         elif self.compression:
             f = _wrap_compressed(f, self.compression, self.encoding)
@@ -1454,7 +1471,6 @@ class PythonParser(ParserBase):
             self._name_processed = True
             if self.index_names is None:
                 self.index_names = index_names
-        self._first_chunk = True
 
         if self.parse_dates:
             self._no_thousands_columns = self._set_no_thousands_columns()
@@ -1528,17 +1544,17 @@ class PythonParser(ParserBase):
                 dia.delimiter = sniffed.delimiter
                 if self.encoding is not None:
                     self.buf.extend(list(
-                        com.UnicodeReader(StringIO(line),
-                                          dialect=dia,
-                                          encoding=self.encoding)))
+                        UnicodeReader(StringIO(line),
+                                      dialect=dia,
+                                      encoding=self.encoding)))
                 else:
                     self.buf.extend(list(csv.reader(StringIO(line),
                                                     dialect=dia)))
 
             if self.encoding is not None:
-                reader = com.UnicodeReader(f, dialect=dia,
-                                           encoding=self.encoding,
-                                           strict=True)
+                reader = UnicodeReader(f, dialect=dia,
+                                       encoding=self.encoding,
+                                       strict=True)
             else:
                 reader = csv.reader(f, dialect=dia,
                                     strict=True)
@@ -2057,6 +2073,7 @@ def _make_date_converter(date_parser=None, dayfirst=False,
                     utc=None,
                     box=False,
                     dayfirst=dayfirst,
+                    errors='ignore',
                     infer_datetime_format=infer_datetime_format
                 )
             except:
@@ -2064,7 +2081,7 @@ def _make_date_converter(date_parser=None, dayfirst=False,
                     lib.try_parse_dates(strs, dayfirst=dayfirst))
         else:
             try:
-                result = tools.to_datetime(date_parser(*date_cols))
+                result = tools.to_datetime(date_parser(*date_cols), errors='ignore')
                 if isinstance(result, datetime.datetime):
                     raise Exception('scalar parser')
                 return result
@@ -2073,7 +2090,8 @@ def _make_date_converter(date_parser=None, dayfirst=False,
                     return tools.to_datetime(
                         lib.try_parse_dates(_concat_date_cols(date_cols),
                                             parser=date_parser,
-                                            dayfirst=dayfirst))
+                                            dayfirst=dayfirst),
+                        errors='ignore')
                 except Exception:
                     return generic_parser(date_parser, *date_cols)
 

@@ -2,6 +2,7 @@ from datetime import datetime,timedelta
 from pandas.compat import range, long, zip
 from pandas import compat
 import re
+import warnings
 
 import numpy as np
 
@@ -14,6 +15,7 @@ import pandas.lib as lib
 import pandas.tslib as tslib
 import pandas._period as period
 from pandas.tslib import Timedelta
+from pytz import AmbiguousTimeError
 
 class FreqGroup(object):
     FR_ANN = 1000
@@ -174,7 +176,7 @@ def get_to_timestamp_base(base):
 
 def get_freq_group(freq):
     """
-    Return frequency code group of given frequency str.
+    Return frequency code group of given frequency str or offset.
 
     Example
     -------
@@ -184,9 +186,16 @@ def get_freq_group(freq):
     >>> get_freq_group('W-FRI')
     4000
     """
+    if isinstance(freq, offsets.DateOffset):
+        freq = freq.rule_code
+
     if isinstance(freq, compat.string_types):
         base, mult = get_freq_code(freq)
         freq = base
+    elif isinstance(freq, int):
+        pass
+    else:
+        raise ValueError('input must be str, offset or int')
     return (freq // 1000) * 1000
 
 
@@ -335,10 +344,8 @@ def get_period_alias(offset_str):
 _rule_aliases = {
     # Legacy rules that will continue to map to their original values
     # essentially for the rest of time
-
     'WEEKDAY': 'B',
     'EOM': 'BM',
-
     'W@MON': 'W-MON',
     'W@TUE': 'W-TUE',
     'W@WED': 'W-WED',
@@ -346,18 +353,9 @@ _rule_aliases = {
     'W@FRI': 'W-FRI',
     'W@SAT': 'W-SAT',
     'W@SUN': 'W-SUN',
-    'W': 'W-SUN',
-
     'Q@JAN': 'BQ-JAN',
     'Q@FEB': 'BQ-FEB',
     'Q@MAR': 'BQ-MAR',
-    'Q': 'Q-DEC',
-
-    'A': 'A-DEC',  # YearEnd(month=12),
-    'AS': 'AS-JAN',  # YearBegin(month=1),
-    'BA': 'BA-DEC',  # BYearEnd(month=12),
-    'BAS': 'BAS-JAN',  # BYearBegin(month=1),
-
     'A@JAN': 'BA-JAN',
     'A@FEB': 'BA-FEB',
     'A@MAR': 'BA-MAR',
@@ -370,8 +368,17 @@ _rule_aliases = {
     'A@OCT': 'BA-OCT',
     'A@NOV': 'BA-NOV',
     'A@DEC': 'BA-DEC',
+}
 
-    # lite aliases
+_lite_rule_alias = {
+    'W': 'W-SUN',
+    'Q': 'Q-DEC',
+
+    'A': 'A-DEC',  # YearEnd(month=12),
+    'AS': 'AS-JAN',  # YearBegin(month=1),
+    'BA': 'BA-DEC',  # BYearEnd(month=12),
+    'BAS': 'BAS-JAN',  # BYearBegin(month=1),
+
     'Min': 'T',
     'min': 'T',
     'ms': 'L',
@@ -386,6 +393,7 @@ for _i, _weekday in enumerate(['MON', 'TUE', 'WED', 'THU', 'FRI']):
 
 # Note that _rule_aliases is not 1:1 (d[BA]==d[A@DEC]), and so traversal
 # order matters when constructing an inverse. we pick one. #2331
+# Used in get_legacy_offset_name
 _legacy_reverse_map = dict((v, k) for k, v in
                            reversed(sorted(compat.iteritems(_rule_aliases))))
 
@@ -501,6 +509,9 @@ def get_base_alias(freqstr):
 _dont_uppercase = set(('MS', 'ms'))
 
 
+_LEGACY_FREQ_WARNING = 'Freq "{0}" is deprecated, use "{1}" as alternative.'
+
+
 def get_offset(name):
     """
     Return DateOffset object associated with rule name
@@ -513,12 +524,26 @@ def get_offset(name):
         name = name.upper()
 
         if name in _rule_aliases:
-            name = _rule_aliases[name]
+            new = _rule_aliases[name]
+            warnings.warn(_LEGACY_FREQ_WARNING.format(name, new),
+                          FutureWarning, stacklevel=2)
+            name = new
         elif name.lower() in _rule_aliases:
-            name = _rule_aliases[name.lower()]
+            new = _rule_aliases[name.lower()]
+            warnings.warn(_LEGACY_FREQ_WARNING.format(name, new),
+                          FutureWarning, stacklevel=2)
+            name = new
+
+        name = _lite_rule_alias.get(name, name)
+        name = _lite_rule_alias.get(name.lower(), name)
+
     else:
         if name in _rule_aliases:
-            name = _rule_aliases[name]
+            new = _rule_aliases[name]
+            warnings.warn(_LEGACY_FREQ_WARNING.format(name, new),
+                          FutureWarning, stacklevel=2)
+            name = new
+        name = _lite_rule_alias.get(name, name)
 
     if name not in _offset_map:
         try:
@@ -561,6 +586,9 @@ def get_legacy_offset_name(offset):
     """
     Return the pre pandas 0.8.0 name for the date offset
     """
+
+    # This only used in test_timeseries_legacy.py
+
     name = offset.name
     return _legacy_reverse_map.get(name, name)
 
@@ -572,7 +600,7 @@ def get_standard_freq(freq):
         return None
 
     if isinstance(freq, DateOffset):
-        return get_offset_name(freq)
+        return freq.rule_code
 
     code, stride = get_freq_code(freq)
     return _get_freq_str(code, stride)
@@ -754,10 +782,21 @@ _period_alias_dict = _period_alias_dictionary()
 
 def _period_str_to_code(freqstr):
     # hack
-    freqstr = _rule_aliases.get(freqstr, freqstr)
+    if freqstr in _rule_aliases:
+        new = _rule_aliases[freqstr]
+        warnings.warn(_LEGACY_FREQ_WARNING.format(freqstr, new),
+                      FutureWarning, stacklevel=3)
+        freqstr = new
+    freqstr = _lite_rule_alias.get(freqstr, freqstr)
 
     if freqstr not in _dont_uppercase:
-        freqstr = _rule_aliases.get(freqstr.lower(), freqstr)
+        lower = freqstr.lower()
+        if lower in _rule_aliases:
+            new = _rule_aliases[lower]
+            warnings.warn(_LEGACY_FREQ_WARNING.format(lower, new),
+                          FutureWarning, stacklevel=3)
+            freqstr = new
+        freqstr = _lite_rule_alias.get(lower, freqstr)
 
     try:
         if freqstr not in _dont_uppercase:
@@ -766,6 +805,8 @@ def _period_str_to_code(freqstr):
     except KeyError:
         try:
             alias = _period_alias_dict[freqstr]
+            warnings.warn(_LEGACY_FREQ_WARNING.format(freqstr, alias),
+                          FutureWarning, stacklevel=3)
         except KeyError:
             raise ValueError("Unknown freqstr: %s" % freqstr)
 
@@ -793,8 +834,8 @@ def infer_freq(index, warn=True):
     import pandas as pd
 
     if isinstance(index, com.ABCSeries):
-        values = index.values
-        if not (com.is_datetime64_dtype(index.values) or com.is_timedelta64_dtype(index.values) or values.dtype == object):
+        values = index._values
+        if not (com.is_datetime64_dtype(values) or com.is_timedelta64_dtype(values) or values.dtype == object):
             raise TypeError("cannot infer freq from a non-convertible dtype on a Series of {0}".format(index.dtype))
         index = values
 
@@ -810,7 +851,12 @@ def infer_freq(index, warn=True):
             raise TypeError("cannot infer freq from a non-convertible index type {0}".format(type(index)))
         index = index.values
 
-    index = pd.DatetimeIndex(index)
+    if not isinstance(index, pd.DatetimeIndex):
+        try:
+            index = pd.DatetimeIndex(index)
+        except AmbiguousTimeError:
+            index = pd.DatetimeIndex(index.asi8)
+
     inferer = _FrequencyInferer(index, warn=warn)
     return inferer.get_freq()
 
@@ -842,7 +888,8 @@ class _FrequencyInferer(object):
         if len(index) < 3:
             raise ValueError('Need at least 3 dates to infer frequency')
 
-        self.is_monotonic = self.index.is_monotonic
+        self.is_monotonic = (self.index.is_monotonic_increasing or
+                             self.index.is_monotonic_decreasing)
 
     @cache_readonly
     def deltas(self):
@@ -926,7 +973,6 @@ class _FrequencyInferer(object):
 
         from calendar import monthrange
         for y, m, d, wd in zip(years, months, days, weekdays):
-            wd = datetime(y, m, d).weekday()
 
             if calendar_start:
                 calendar_start &= d == 1
@@ -980,7 +1026,7 @@ class _FrequencyInferer(object):
 
         monthly_rule = self._get_monthly_rule()
         if monthly_rule:
-            return monthly_rule
+            return _maybe_add_count(monthly_rule, self.mdiffs[0])
 
         if self.is_unique:
             days = self.deltas[0] / _ONE_DAY
@@ -1066,7 +1112,7 @@ class _TimedeltaFrequencyInferer(_FrequencyInferer):
 
 
 def _maybe_add_count(base, count):
-    if count > 1:
+    if count != 1:
         return '%d%s' % (count, base)
     else:
         return base

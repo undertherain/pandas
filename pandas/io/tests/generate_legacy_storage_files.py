@@ -1,10 +1,11 @@
 """ self-contained to write legacy storage (pickle/msgpack) files """
 from __future__ import print_function
 from distutils.version import LooseVersion
-from pandas import (Series, TimeSeries, DataFrame, Panel,
-                    SparseSeries, SparseTimeSeries, SparseDataFrame, SparsePanel,
+from pandas import (Series, DataFrame, Panel,
+                    SparseSeries, SparseDataFrame, SparsePanel,
                     Index, MultiIndex, PeriodIndex, bdate_range, to_msgpack,
-                    date_range, period_range, bdate_range, Timestamp, Categorical)
+                    date_range, period_range, bdate_range, Timestamp, Categorical,
+                    Period)
 import os
 import sys
 import numpy as np
@@ -35,7 +36,7 @@ def _create_sp_tsseries():
     arr[-1:] = nan
 
     date_index = bdate_range('1/1/2011', periods=len(arr))
-    bseries = SparseTimeSeries(arr, index=date_index, kind='block')
+    bseries = SparseSeries(arr, index=date_index, kind='block')
     bseries.name = 'btsseries'
     return bseries
 
@@ -63,6 +64,10 @@ def create_data():
         'E': [0., 1, Timestamp('20100101'), 'foo', 2.]
     }
 
+    scalars = dict(timestamp=Timestamp('20130101'))
+    if LooseVersion(pandas.__version__) >= '0.17.0':
+        scalars['period'] = Period('2012','M')
+
     index = dict(int=Index(np.arange(10)),
                  date=date_range('20130101', periods=10),
                  period=period_range('2013-01-01', freq='M', periods=10))
@@ -73,12 +78,16 @@ def create_data():
     series = dict(float=Series(data['A']),
                   int=Series(data['B']),
                   mixed=Series(data['E']),
-                  ts=TimeSeries(np.arange(10).astype(np.int64), index=date_range('20130101',periods=10)),
+                  ts=Series(np.arange(10).astype(np.int64), index=date_range('20130101',periods=10)),
                   mi=Series(np.arange(5).astype(np.float64),
                             index=MultiIndex.from_tuples(tuple(zip(*[[1, 1, 2, 2, 2], [3, 4, 3, 4, 5]])),
                                                          names=['one', 'two'])),
                   dup=Series(np.arange(5).astype(np.float64), index=['A', 'B', 'C', 'D', 'A']),
-                  cat=Series(Categorical(['foo', 'bar', 'baz'])))
+                  cat=Series(Categorical(['foo', 'bar', 'baz'])),
+                  dt=Series(date_range('20130101',periods=5)),
+                  dt_tz=Series(date_range('20130101',periods=5,tz='US/Eastern')))
+    if LooseVersion(pandas.__version__) >= '0.17.0':
+        series['period'] = Series([Period('2000Q1')] * 5)
 
     mixed_dup_df = DataFrame(data)
     mixed_dup_df.columns = list("ABCDA")
@@ -94,7 +103,9 @@ def create_data():
                  cat_onecol=DataFrame(dict(A=Categorical(['foo', 'bar']))),
                  cat_and_float=DataFrame(dict(A=Categorical(['foo', 'bar', 'baz']),
                                               B=np.arange(3).astype(np.int64))),
-                 mixed_dup=mixed_dup_df)
+                 mixed_dup=mixed_dup_df,
+                 dt_mixed_tzs=DataFrame(dict(A=Timestamp('20130102', tz='US/Eastern'), B=Timestamp('20130603', tz='CET')), index=range(5)),
+                 )
 
     mixed_dup_panel = Panel(dict(ItemA=frame['float'], ItemB=frame['int']))
     mixed_dup_panel.items = ['ItemA', 'ItemA']
@@ -107,6 +118,7 @@ def create_data():
                 frame=frame,
                 panel=panel,
                 index=index,
+                scalars=scalars,
                 mi=mi,
                 sp_series=dict(float=_create_sp_series(),
                                ts=_create_sp_tsseries()),

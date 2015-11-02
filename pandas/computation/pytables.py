@@ -129,7 +129,7 @@ class BinOp(ops.BinOp):
         """ inplace conform rhs """
         if not com.is_list_like(rhs):
             rhs = [rhs]
-        if hasattr(self.rhs, 'ravel'):
+        if isinstance(rhs, np.ndarray):
             rhs = rhs.ravel()
         return rhs
 
@@ -535,7 +535,7 @@ class Expr(expr.Expr):
                 w, op, value = w
             warnings.warn("passing a tuple into Expr is deprecated, "
                           "pass the where as a single string",
-                          DeprecationWarning)
+                          DeprecationWarning, stacklevel=10)
 
         if op is not None:
             if not isinstance(w, string_types):

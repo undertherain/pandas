@@ -1035,6 +1035,12 @@ class NumpyJSONTests(TestCase):
         outp = ujson.decode(ujson.encode(arr), numpy=True, dtype=np.float32)
         assert_array_almost_equal_nulp(arr, outp)
 
+    def testOdArray(self):
+        def will_raise():
+            ujson.encode(np.array(1))
+
+        self.assertRaises(TypeError, will_raise)
+
     def testArrayNumpyExcept(self):
 
         input = ujson.dumps([42, {}, 'a'])
@@ -1131,22 +1137,20 @@ class NumpyJSONTests(TestCase):
         self.assertTrue(output[1] is None)
         self.assertTrue((np.array([u('a')]) == output[2]).all())
 
-        # py3 is non-determinstic on the ordering......
-        if not compat.PY3:
-            input = [{'a': 42, 'b':31}, {'a': 24, 'c': 99}, {'a': 2.4, 'b': 78}]
-            output = ujson.loads(ujson.dumps(input), numpy=True, labelled=True)
-            expectedvals = np.array([42, 31, 24, 99, 2.4, 78], dtype=int).reshape((3,2))
-            self.assertTrue((expectedvals == output[0]).all())
-            self.assertTrue(output[1] is None)
-            self.assertTrue((np.array([u('a'), 'b']) == output[2]).all())
+        # Write out the dump explicitly so there is no dependency on iteration order GH10837
+        input_dumps = '[{"a": 42, "b":31}, {"a": 24, "c": 99}, {"a": 2.4, "b": 78}]'
+        output = ujson.loads(input_dumps, numpy=True, labelled=True)
+        expectedvals = np.array([42, 31, 24, 99, 2.4, 78], dtype=int).reshape((3, 2))
+        self.assertTrue((expectedvals == output[0]).all())
+        self.assertTrue(output[1] is None)
+        self.assertTrue((np.array([u('a'), 'b']) == output[2]).all())
 
-
-            input = {1: {'a': 42, 'b':31}, 2: {'a': 24, 'c': 99}, 3: {'a': 2.4, 'b': 78}}
-            output = ujson.loads(ujson.dumps(input), numpy=True, labelled=True)
-            expectedvals = np.array([42, 31, 24, 99, 2.4, 78], dtype=int).reshape((3,2))
-            self.assertTrue((expectedvals == output[0]).all())
-            self.assertTrue((np.array(['1','2','3']) == output[1]).all())
-            self.assertTrue((np.array(['a', 'b']) == output[2]).all())
+        input_dumps = '{"1": {"a": 42, "b":31}, "2": {"a": 24, "c": 99}, "3": {"a": 2.4, "b": 78}}'
+        output = ujson.loads(input_dumps, numpy=True, labelled=True)
+        expectedvals = np.array([42, 31, 24, 99, 2.4, 78], dtype=int).reshape((3, 2))
+        self.assertTrue((expectedvals == output[0]).all())
+        self.assertTrue((np.array(['1', '2', '3']) == output[1]).all())
+        self.assertTrue((np.array(['a', 'b']) == output[2]).all())
 
 
 class PandasJSONTests(TestCase):
@@ -1246,16 +1250,13 @@ class PandasJSONTests(TestCase):
         tm.assert_numpy_array_equal(df.index, outp.index)
 
     def testSeries(self):
-        s = Series([10, 20, 30, 40, 50, 60], name="series", index=[6,7,8,9,10,15])
-        s.sort()
+        s = Series([10, 20, 30, 40, 50, 60], name="series", index=[6,7,8,9,10,15]).sort_values()
 
         # column indexed
-        outp = Series(ujson.decode(ujson.encode(s)))
-        outp.sort()
+        outp = Series(ujson.decode(ujson.encode(s))).sort_values()
         self.assertTrue((s == outp).values.all())
 
-        outp = Series(ujson.decode(ujson.encode(s), numpy=True))
-        outp.sort()
+        outp = Series(ujson.decode(ujson.encode(s), numpy=True)).sort_values()
         self.assertTrue((s == outp).values.all())
 
         dec = _clean_dict(ujson.decode(ujson.encode(s, orient="split")))
@@ -1281,17 +1282,14 @@ class PandasJSONTests(TestCase):
         outp = Series(ujson.decode(ujson.encode(s, orient="values")))
         self.assertTrue((s == outp).values.all())
 
-        outp = Series(ujson.decode(ujson.encode(s, orient="index")))
-        outp.sort()
+        outp = Series(ujson.decode(ujson.encode(s, orient="index"))).sort_values()
         self.assertTrue((s == outp).values.all())
 
-        outp = Series(ujson.decode(ujson.encode(s, orient="index"), numpy=True))
-        outp.sort()
+        outp = Series(ujson.decode(ujson.encode(s, orient="index"), numpy=True)).sort_values()
         self.assertTrue((s == outp).values.all())
 
     def testSeriesNested(self):
-        s = Series([10, 20, 30, 40, 50, 60], name="series", index=[6,7,8,9,10,15])
-        s.sort()
+        s = Series([10, 20, 30, 40, 50, 60], name="series", index=[6,7,8,9,10,15]).sort_values()
 
         nested = {'s1': s, 's2': s.copy()}
 

@@ -4,9 +4,10 @@ from pandas.compat import range
 import numpy as np
 from numpy.random import RandomState
 
-from pandas.core.api import Series, Categorical
+from pandas.core.api import Series, Categorical, CategoricalIndex
 import pandas as pd
 
+from pandas import compat
 import pandas.core.algorithms as algos
 import pandas.util.testing as tm
 import pandas.hashtable as hashtable
@@ -235,6 +236,112 @@ class TestUnique(tm.TestCase):
 
         tm.assert_almost_equal(result, expected)
 
+    def test_datetime64_dtype_array_returned(self):
+        # GH 9431
+        expected = np.array(['2015-01-03T00:00:00.000000000+0000',
+                             '2015-01-01T00:00:00.000000000+0000'], dtype='M8[ns]')
+
+        dt_index = pd.to_datetime(['2015-01-03T00:00:00.000000000+0000',
+                                   '2015-01-01T00:00:00.000000000+0000',
+                                   '2015-01-01T00:00:00.000000000+0000'])
+        result = algos.unique(dt_index)
+        tm.assert_numpy_array_equal(result, expected)
+        self.assertEqual(result.dtype, expected.dtype)
+
+        s = pd.Series(dt_index)
+        result = algos.unique(s)
+        tm.assert_numpy_array_equal(result, expected)
+        self.assertEqual(result.dtype, expected.dtype)
+
+        arr = s.values
+        result = algos.unique(arr)
+        tm.assert_numpy_array_equal(result, expected)
+        self.assertEqual(result.dtype, expected.dtype)
+
+
+    def test_timedelta64_dtype_array_returned(self):
+        # GH 9431
+        expected = np.array([31200, 45678, 10000], dtype='m8[ns]')
+
+        td_index = pd.to_timedelta([31200, 45678, 31200, 10000, 45678])
+        result = algos.unique(td_index)
+        tm.assert_numpy_array_equal(result, expected)
+        self.assertEqual(result.dtype, expected.dtype)
+
+        s = pd.Series(td_index)
+        result = algos.unique(s)
+        tm.assert_numpy_array_equal(result, expected)
+        self.assertEqual(result.dtype, expected.dtype)
+
+        arr = s.values
+        result = algos.unique(arr)
+        tm.assert_numpy_array_equal(result, expected)
+        self.assertEqual(result.dtype, expected.dtype)
+
+class TestIsin(tm.TestCase):
+    _multiprocess_can_split_ = True
+
+    def test_invalid(self):
+
+        self.assertRaises(TypeError, lambda : algos.isin(1,1))
+        self.assertRaises(TypeError, lambda : algos.isin(1,[1]))
+        self.assertRaises(TypeError, lambda : algos.isin([1],1))
+
+    def test_basic(self):
+
+        result = algos.isin([1,2],[1])
+        expected = np.array([True,False])
+        tm.assert_numpy_array_equal(result, expected)
+
+        result = algos.isin(np.array([1,2]),[1])
+        expected = np.array([True,False])
+        tm.assert_numpy_array_equal(result, expected)
+
+        result = algos.isin(pd.Series([1,2]),[1])
+        expected = np.array([True,False])
+        tm.assert_numpy_array_equal(result, expected)
+
+        result = algos.isin(pd.Series([1,2]),pd.Series([1]))
+        expected = np.array([True,False])
+        tm.assert_numpy_array_equal(result, expected)
+
+        result = algos.isin(['a','b'],['a'])
+        expected = np.array([True,False])
+        tm.assert_numpy_array_equal(result, expected)
+
+        result = algos.isin(pd.Series(['a','b']),pd.Series(['a']))
+        expected = np.array([True,False])
+        tm.assert_numpy_array_equal(result, expected)
+
+        result = algos.isin(['a','b'],[1])
+        expected = np.array([False,False])
+        tm.assert_numpy_array_equal(result, expected)
+
+        arr = pd.date_range('20130101',periods=3).values
+        result = algos.isin(arr,[arr[0]])
+        expected = np.array([True,False,False])
+        tm.assert_numpy_array_equal(result, expected)
+
+        result = algos.isin(arr,arr[0:2])
+        expected = np.array([True,True,False])
+        tm.assert_numpy_array_equal(result, expected)
+
+        arr = pd.timedelta_range('1 day',periods=3).values
+        result = algos.isin(arr,[arr[0]])
+        expected = np.array([True,False,False])
+        tm.assert_numpy_array_equal(result, expected)
+
+
+
+    def test_large(self):
+
+        s = pd.date_range('20000101',periods=2000000,freq='s').values
+        result = algos.isin(s,s[0:2])
+        expected = np.zeros(len(s),dtype=bool)
+        expected[0] = True
+        expected[1] = True
+        tm.assert_numpy_array_equal(result, expected)
+
 class TestValueCounts(tm.TestCase):
     _multiprocess_can_split_ = True
 
@@ -246,9 +353,15 @@ class TestValueCounts(tm.TestCase):
         factor = cut(arr, 4)
 
         tm.assertIsInstance(factor, Categorical)
-
         result = algos.value_counts(factor)
-        expected = algos.value_counts(np.asarray(factor))
+        cats = ['(-1.194, -0.535]',
+                '(-0.535, 0.121]',
+                '(0.121, 0.777]',
+                '(0.777, 1.433]'
+        ]
+        expected_index = CategoricalIndex(cats, cats, ordered=True)
+        expected = Series([1, 1, 1, 1],
+                          index=expected_index)
         tm.assert_series_equal(result.sort_index(), expected.sort_index())
 
     def test_value_counts_bins(self):
@@ -288,6 +401,57 @@ class TestValueCounts(tm.TestCase):
         tm.assert_series_equal(algos.value_counts(dt), exp_dt)
         # TODO same for (timedelta)
 
+    def test_categorical(self):
+        s = Series(pd.Categorical(list('aaabbc')))
+        result = s.value_counts()
+        expected = pd.Series([3, 2, 1], index=pd.CategoricalIndex(['a', 'b', 'c']))
+        tm.assert_series_equal(result, expected, check_index_type=True)
+
+        # preserve order?
+        s = s.cat.as_ordered()
+        result = s.value_counts()
+        expected.index = expected.index.as_ordered()
+        tm.assert_series_equal(result, expected, check_index_type=True)
+
+    def test_categorical_nans(self):
+        s = Series(pd.Categorical(list('aaaaabbbcc'))) # 4,3,2,1 (nan)
+        s.iloc[1] = np.nan
+        result = s.value_counts()
+        expected = pd.Series([4, 3, 2],
+                             index=pd.CategoricalIndex(['a', 'b', 'c'],
+                                                       categories=['a', 'b', 'c']))
+        tm.assert_series_equal(result, expected, check_index_type=True)
+        result = s.value_counts(dropna=False)
+        expected = pd.Series([4, 3, 2, 1], index=pd.CategoricalIndex(
+            ['a', 'b',  'c', np.nan]))
+        tm.assert_series_equal(result, expected, check_index_type=True)
+
+        # out of order
+        s = Series(pd.Categorical(list('aaaaabbbcc'),
+                                  ordered=True, categories=['b', 'a', 'c']))
+        s.iloc[1] = np.nan
+        result = s.value_counts()
+        expected = pd.Series([4, 3, 2],
+                             index=pd.CategoricalIndex(['a', 'b', 'c'],
+                                                       categories=['b', 'a', 'c'],
+                                                       ordered=True))
+        tm.assert_series_equal(result, expected, check_index_type=True)
+
+        result = s.value_counts(dropna=False)
+        expected = pd.Series([4, 3, 2, 1], index=pd.CategoricalIndex(
+            ['a', 'b',  'c', np.nan], categories=['b', 'a', 'c'], ordered=True))
+        tm.assert_series_equal(result, expected, check_index_type=True)
+
+    def test_categorical_zeroes(self):
+        # keep the `d` category with 0
+        s = Series(pd.Categorical(list('bbbaac'), categories=list('abcd'),
+                                  ordered=True))
+        result = s.value_counts()
+        expected = Series([3, 2, 1, 0], index=pd.Categorical(
+            ['b', 'a', 'c', 'd'], categories=list('abcd'), ordered=True))
+        tm.assert_series_equal(result, expected, check_index_type=True)
+
+
     def test_dropna(self):
         # https://github.com/pydata/pandas/issues/9443#issuecomment-73719328
 
@@ -304,7 +468,6 @@ class TestValueCounts(tm.TestCase):
         tm.assert_series_equal(
             pd.Series([True, True, False, None]).value_counts(dropna=False),
             pd.Series([2, 1, 1], index=[True, False, np.nan]))
-
         tm.assert_series_equal(
             pd.Series([10.3, 5., 5.]).value_counts(dropna=True),
             pd.Series([2, 1], index=[5., 10.3]))
@@ -315,9 +478,12 @@ class TestValueCounts(tm.TestCase):
         tm.assert_series_equal(
             pd.Series([10.3, 5., 5., None]).value_counts(dropna=True),
             pd.Series([2, 1], index=[5., 10.3]))
-        tm.assert_series_equal(
-            pd.Series([10.3, 5., 5., None]).value_counts(dropna=False),
-            pd.Series([2, 1, 1], index=[5., 10.3, np.nan]))
+
+        # 32-bit linux has a different ordering
+        if not compat.is_platform_32bit():
+            tm.assert_series_equal(
+                pd.Series([10.3, 5., 5., None]).value_counts(dropna=False),
+                pd.Series([2, 1, 1], index=[5., 10.3, np.nan]))
 
 
 class GroupVarTestMixin(object):

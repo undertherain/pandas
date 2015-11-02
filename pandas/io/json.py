@@ -110,12 +110,12 @@ def read_json(path_or_buf=None, orient=None, typ='frame', dtype=True,
 
     Parameters
     ----------
-    filepath_or_buffer : a valid JSON string or file-like
+    path_or_buf : a valid JSON string or file-like, default: None
         The string could be a URL. Valid URL schemes include http, ftp, s3, and
         file. For file URLs, a host is expected. For instance, a local file
         could be ``file://localhost/path/to/table.json``
 
-    orient
+    orient  
 
         * `Series`
 
@@ -150,14 +150,25 @@ def read_json(path_or_buf=None, orient=None, typ='frame', dtype=True,
         Try to convert the axes to the proper dtypes.
     convert_dates : boolean, default True
         List of columns to parse for dates; If True, then try to parse
-        datelike columns default is True
-    keep_default_dates : boolean, default True.
+        datelike columns default is True; a column label is datelike if
+        
+        * it ends with ``'_at'``,
+        
+        * it ends with ``'_time'``,
+        
+        * it begins with ``'timestamp'``,
+        
+        * it is ``'modified'``, or
+        
+        * it is ``'date'``
+
+    keep_default_dates : boolean, default True
         If parsing dates, then parse the default datelike columns
     numpy : boolean, default False
         Direct decoding to numpy arrays. Supports numeric data only, but
         non-numeric column and index labels are supported. Note also that the
         JSON ordering MUST be the same for each term if numpy=True.
-    precise_float : boolean, default False.
+    precise_float : boolean, default False
         Set to enable usage of higher precision (strtod) function when
         decoding string to double values. Default (False) is to use fast but
         less precise builtin functionality
@@ -543,11 +554,13 @@ class FrameParser(Parser):
             if not isinstance(col, compat.string_types):
                 return False
 
-            if (col.endswith('_at') or
-                    col.endswith('_time') or
-                    col.lower() == 'modified' or
-                    col.lower() == 'date' or
-                    col.lower() == 'datetime'):
+            col_lower = col.lower()
+            if (col_lower.endswith('_at') or
+                    col_lower.endswith('_time') or
+                    col_lower == 'modified' or
+                    col_lower == 'date' or
+                    col_lower == 'datetime' or
+                    col_lower.startswith('timestamp')):
                 return True
             return False
 
@@ -569,6 +582,8 @@ def nested_to_record(ds, prefix="", level=0):
     Parameters
     ----------
     ds : dict or list of dicts
+    prefix: the prefix, optional, default: ""
+    level: the number of levels in the jason string, optional, default: 0
 
     Returns
     -------
@@ -633,7 +648,7 @@ def json_normalize(data, record_path=None, meta=None,
     record_path : string or list of strings, default None
         Path in each object to list of records. If not passed, data will be
         assumed to be an array of records
-    meta : list of paths (string or list of strings)
+    meta : list of paths (string or list of strings), default None
         Fields to use as metadata for each record in resulting table
     record_prefix : string, default None
         If True, prefix records with dotted (?) path, e.g. foo.bar.field if

@@ -17,24 +17,16 @@ from distutils.version import LooseVersion
 import versioneer
 cmdclass = versioneer.get_cmdclass()
 
-# may need to work around setuptools bug by providing a fake Pyrex
 min_cython_ver = '0.19.1'
 try:
     import Cython
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "fake_pyrex"))
     ver = Cython.__version__
     _CYTHON_INSTALLED = ver >= LooseVersion(min_cython_ver)
 except ImportError:
     _CYTHON_INSTALLED = False
 
-# try bootstrapping setuptools if it doesn't exist
 try:
     import pkg_resources
-    try:
-        pkg_resources.require("setuptools>=0.6c5")
-    except pkg_resources.VersionConflict:
-        from ez_setup import use_setuptools
-        use_setuptools(version="0.6c5")
     from setuptools import setup, Command
     _have_setuptools = True
 except ImportError:
@@ -84,7 +76,6 @@ try:
     if not _CYTHON_INSTALLED:
         raise ImportError('No supported version of Cython installed.')
     from Cython.Distutils import build_ext as _build_ext
-    # from Cython.Distutils import Extension # to get pyrex debugging symbols
     cython = True
 except ImportError:
     cython = False
@@ -190,6 +181,7 @@ CLASSIFIERS = [
     'Programming Language :: Python :: 2.7',
     'Programming Language :: Python :: 3.3',
     'Programming Language :: Python :: 3.4',
+    'Programming Language :: Python :: 3.5',
     'Programming Language :: Cython',
     'Topic :: Scientific/Engineering',
 ]
@@ -269,6 +261,7 @@ class CheckSDist(sdist_class):
                  'pandas/index.pyx',
                  'pandas/algos.pyx',
                  'pandas/parser.pyx',
+                 'pandas/src/period.pyx',
                  'pandas/src/sparse.pyx',
                  'pandas/src/testing.pyx']
 
@@ -465,18 +458,22 @@ if sys.byteorder == 'big':
 else:
     macros = [('__LITTLE_ENDIAN__', '1')]
 
-msgpack_ext = Extension('pandas.msgpack',
-                        sources = [srcpath('msgpack',
+packer_ext = Extension('pandas.msgpack._packer',
+                        sources = [srcpath('_packer',
                                    suffix=suffix if suffix == '.pyx' else '.cpp',
-                                   subdir='')],
+                                   subdir='msgpack')],
                         language='c++',
-                        include_dirs=common_include,
+                        include_dirs=['pandas/src/msgpack'] + common_include,
                         define_macros=macros)
-
-extensions.append(msgpack_ext)
-
-# if not ISRELEASED:
-#     extensions.extend([sandbox_ext])
+unpacker_ext = Extension('pandas.msgpack._unpacker',
+                        sources = [srcpath('_unpacker',
+                                   suffix=suffix if suffix == '.pyx' else '.cpp',
+                                   subdir='msgpack')],
+                        language='c++',
+                        include_dirs=['pandas/src/msgpack'] + common_include,
+                        define_macros=macros)
+extensions.append(packer_ext)
+extensions.append(unpacker_ext)
 
 if suffix == '.pyx' and 'setuptools' in sys.modules:
     # undo dumb setuptools bug clobbering .pyx sources back to .c
@@ -534,11 +531,13 @@ setup(name=DISTNAME,
                 'pandas.io.tests',
                 'pandas.io.tests.test_json',
                 'pandas.stats.tests',
+                'pandas.msgpack'
                 ],
       package_data={'pandas.io': ['tests/data/legacy_hdf/*.h5',
                                   'tests/data/legacy_pickle/*/*.pickle',
                                   'tests/data/legacy_msgpack/*/*.msgpack',
                                   'tests/data/*.csv*',
+                                  'tests/data/*.XPT',
                                   'tests/data/*.dta',
                                   'tests/data/*.txt',
                                   'tests/data/*.xls',

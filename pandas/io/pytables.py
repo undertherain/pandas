@@ -13,7 +13,8 @@ import warnings
 import os
 
 import numpy as np
-from pandas import (Series, TimeSeries, DataFrame, Panel, Panel4D, Index,
+import pandas as pd
+from pandas import (Series, DataFrame, Panel, Panel4D, Index,
                     MultiIndex, Int64Index, Timestamp)
 from pandas.sparse.api import SparseSeries, SparseDataFrame, SparsePanel
 from pandas.sparse.array import BlockIndex, IntIndex
@@ -50,7 +51,7 @@ _version = '0.15.2'
 _default_encoding = 'UTF-8'
 
 def _ensure_decoded(s):
-    """ if we have bytes, decode them to unicde """
+    """ if we have bytes, decode them to unicode """
     if isinstance(s, np.bytes_):
         s = s.decode('UTF-8')
     return s
@@ -164,7 +165,7 @@ _TYPE_MAP = {
 
     Series: u('series'),
     SparseSeries: u('sparse_series'),
-    TimeSeries: u('series'),
+    pd.TimeSeries: u('series'),
     DataFrame: u('frame'),
     SparseDataFrame: u('sparse_frame'),
     Panel: u('wide'),
@@ -220,7 +221,7 @@ format_doc = """
 """
 
 with config.config_prefix('io.hdf'):
-    config.register_option('dropna_table', True, dropna_doc,
+    config.register_option('dropna_table', False, dropna_doc,
                            validator=config.is_bool)
     config.register_option(
         'default_format', None, format_doc,
@@ -817,7 +818,7 @@ class HDFStore(StringMixin):
             This will force Table format, append the input data to the
             existing.
         encoding : default None, provide an encoding for strings
-        dropna   : boolean, default True, do not write an ALL nan row to
+        dropna   : boolean, default False, do not write an ALL nan row to
             the store settable by the option 'io.hdf.dropna_table'
         """
         if format is None:
@@ -899,7 +900,7 @@ class HDFStore(StringMixin):
         chunksize    : size to chunk the writing
         expectedrows : expected TOTAL row size of this table
         encoding     : default None, provide an encoding for strings
-        dropna       : boolean, default True, do not write an ALL nan row to
+        dropna       : boolean, default False, do not write an ALL nan row to
             the store settable by the option 'io.hdf.dropna_table'
         Notes
         -----
@@ -919,7 +920,7 @@ class HDFStore(StringMixin):
                              **kwargs)
 
     def append_to_multiple(self, d, value, selector, data_columns=None,
-                           axes=None, dropna=True, **kwargs):
+                           axes=None, dropna=False, **kwargs):
         """
         Append to multiple tables
 
@@ -934,7 +935,7 @@ class HDFStore(StringMixin):
         data_columns : list of columns to create as data columns, or True to
             use all columns
         dropna : if evaluates to True, drop rows from all tables if any single
-                 row in each table has all NaN
+                 row in each table has all NaN. Default False.
 
         Notes
         -----
@@ -1115,17 +1116,6 @@ class HDFStore(StringMixin):
     def _validate_format(self, format, kwargs):
         """ validate / deprecate formats; return the new kwargs """
         kwargs = kwargs.copy()
-
-        # table arg
-        table = kwargs.pop('table', None)
-
-        if table is not None:
-            warnings.warn(format_deprecate_doc, FutureWarning)
-
-            if table:
-                format = 'table'
-            else:
-                format = 'fixed'
 
         # validate
         try:
@@ -1606,7 +1596,7 @@ class IndexCol(StringMixin):
                 # frequency/name just warn
                 if key in ['freq', 'index_name']:
                     ws = attribute_conflict_doc % (key, existing_value, value)
-                    warnings.warn(ws, AttributeConflictWarning)
+                    warnings.warn(ws, AttributeConflictWarning, stacklevel=6)
 
                     # reset
                     idx[key] = None
@@ -1800,6 +1790,8 @@ class DataCol(IndexCol):
         # short-cut certain block types
         if block.is_categorical:
             return self.set_atom_categorical(block, items=block_items, info=info)
+        elif block.is_datetimetz:
+            return self.set_atom_datetime64tz(block, info=info)
         elif block.is_datetime:
             return self.set_atom_datetime64(block)
         elif block.is_timedelta:
@@ -1814,50 +1806,14 @@ class DataCol(IndexCol):
             raise TypeError(
                 "[date] is not implemented as a table column")
         elif inferred_type == 'datetime':
-            rvalues = block.values.ravel()
-            if getattr(rvalues[0], 'tzinfo', None) is not None:
+            # after 8260
+            # this only would be hit for a mutli-timezone dtype
+            # which is an error
 
-                # if this block has more than one timezone, raise
-                try:
-                    # pytz timezones: compare on zone name (to avoid issues with DST being a different zone to STD).
-                    zones = [r.tzinfo.zone for r in rvalues]
-                except:
-                    # dateutil timezones: compare on ==
-                    zones = [r.tzinfo for r in rvalues]
-                    if any(zones[0] != zone_i for zone_i in zones[1:]):
-                        raise TypeError(
-                            "too many timezones in this block, create separate "
-                            "data columns"
-                        )
-                else:
-                    if len(set(zones)) != 1:
-                        raise TypeError(
-                            "too many timezones in this block, create separate "
-                            "data columns"
-                        )
-
-                # convert this column to datetime64[ns] utc, and save the tz
-                index = DatetimeIndex(rvalues)
-                tz = getattr(index, 'tz', None)
-                if tz is None:
-                    raise TypeError(
-                        "invalid timezone specification")
-
-                values = index.tz_convert('UTC').values.view('i8')
-
-                # store a converted timezone
-                zone = tslib.get_timezone(index.tz)
-                if zone is None:
-                    zone = tslib.tot_seconds(index.tz.utcoffset())
-                self.tz = zone
-
-                self.update_info(info)
-                self.set_atom_datetime64(
-                    block, values.reshape(block.values.shape))
-
-            else:
-                raise TypeError(
-                    "[datetime] is not implemented as a table column")
+            raise TypeError(
+                "too many timezones in this block, create separate "
+                "data columns"
+                )
         elif inferred_type == 'unicode':
             raise TypeError(
                 "[unicode] is not implemented as a table column")
@@ -1883,7 +1839,9 @@ class DataCol(IndexCol):
                         nan_rep, encoding):
         # fill nan items with myself, don't disturb the blocks by
         # trying to downcast
-        block = block.fillna(nan_rep, downcast=False)[0]
+        block = block.fillna(nan_rep, downcast=False)
+        if isinstance(block, list):
+            block = block[0]
         data = block.values
 
         # see if we have a valid string type
@@ -1904,7 +1862,8 @@ class DataCol(IndexCol):
                     )
 
         # itemsize is the maximum length of a string (along any dimension)
-        itemsize = lib.max_len_string_array(com._ensure_object(data.ravel()))
+        data_converted = _convert_string_array(data, encoding)
+        itemsize = data_converted.itemsize
 
         # specified min_itemsize?
         if isinstance(min_itemsize, dict):
@@ -1921,10 +1880,7 @@ class DataCol(IndexCol):
         self.itemsize = itemsize
         self.kind = 'string'
         self.typ = self.get_atom_string(block, itemsize)
-        self.set_data(self.convert_string_data(data, itemsize, encoding))
-
-    def convert_string_data(self, data, itemsize, encoding):
-        return _convert_string_array(data, encoding, itemsize)
+        self.set_data(data_converted.astype('|S%d' % itemsize, copy=False))
 
     def get_atom_coltype(self, kind=None):
         """ return the PyTables column class for this column """
@@ -1984,6 +1940,25 @@ class DataCol(IndexCol):
         self.typ = self.get_atom_datetime64(block)
         if values is None:
             values = block.values.view('i8')
+        self.set_data(values, 'datetime64')
+
+    def set_atom_datetime64tz(self, block, info, values=None):
+
+        if values is None:
+            values = block.values
+
+        # convert this column to datetime64[ns] utc, and save the tz
+        values = values.tz_convert('UTC').values.view('i8').reshape(block.shape)
+
+        # store a converted timezone
+        zone = tslib.get_timezone(block.values.tz)
+        if zone is None:
+            zone = tslib.tot_seconds(block.values.tz.utcoffset())
+        self.tz = zone
+        self.update_info(info)
+
+        self.kind = 'datetime64'
+        self.typ = self.get_atom_datetime64(block)
         self.set_data(values, 'datetime64')
 
     def get_atom_timedelta64(self, block):
@@ -2047,9 +2022,8 @@ class DataCol(IndexCol):
                     # we stored as utc, so just set the tz
 
                     index = DatetimeIndex(
-                        self.data.ravel(), tz='UTC').tz_convert(self.tz)
-                    self.data = np.asarray(
-                        index.tolist(), dtype=object).reshape(self.data.shape)
+                        self.data.ravel(), tz='UTC').tz_convert(tslib.maybe_get_tz(self.tz))
+                    self.data = index
 
                 else:
                     self.data = np.asarray(self.data, dtype='M8[ns]')
@@ -2591,7 +2565,7 @@ class GenericFixed(Fixed):
                 except:
                     pass
                 ws = performance_doc % (inferred_type, key, items)
-                warnings.warn(ws, PerformanceWarning)
+                warnings.warn(ws, PerformanceWarning, stacklevel=7)
 
             vlarr = self._handle.create_vlarray(self.group, key,
                                                _tables().ObjectAtom())
@@ -3049,7 +3023,8 @@ class Table(Fixed):
 
         """
         values = Series(values)
-        self.parent.put(self._get_metadata_path(key), values, format='table')
+        self.parent.put(self._get_metadata_path(key), values, format='table',
+                encoding=self.encoding, nan_rep=self.nan_rep)
 
     def read_metadata(self, key):
         """ return the meta data array for this key """
@@ -3725,7 +3700,7 @@ class LegacyTable(Table):
                 objs.append(obj)
 
         else:
-            warnings.warn(duplicate_doc, DuplicateWarning)
+            warnings.warn(duplicate_doc, DuplicateWarning, stacklevel=5)
 
             # reconstruct
             long_index = MultiIndex.from_arrays(
@@ -3787,7 +3762,7 @@ class AppendableTable(LegacyTable):
 
     def write(self, obj, axes=None, append=False, complib=None,
               complevel=None, fletcher32=None, min_itemsize=None,
-              chunksize=None, expectedrows=None, dropna=True, **kwargs):
+              chunksize=None, expectedrows=None, dropna=False, **kwargs):
 
         if not append and self.is_exists:
             self._handle.remove_node(self.group, 'table')
@@ -3827,7 +3802,7 @@ class AppendableTable(LegacyTable):
         # add the rows
         self.write_data(chunksize, dropna=dropna)
 
-    def write_data(self, chunksize, dropna=True):
+    def write_data(self, chunksize, dropna=False):
         """ we form the data into a 2-d including indexes,values,mask
             write chunk-by-chunk """
 
@@ -3973,7 +3948,7 @@ class AppendableTable(LegacyTable):
         values = self.selection.select_coords()
 
         # delete the rows in reverse order
-        l = Series(values).order()
+        l = Series(values).sort_values()
         ln = len(l)
 
         if ln:
@@ -4057,7 +4032,7 @@ class AppendableFrameTable(AppendableTable):
                 cols_ = cols
 
             # if we have a DataIndexableCol, its shape will only be 1 dim
-            if values.ndim == 1:
+            if values.ndim == 1 and isinstance(values, np.ndarray):
                 values = values.reshape((1, values.shape[0]))
 
             block = make_block(values, placement=np.arange(len(cols_)))
@@ -4399,11 +4374,23 @@ def _unconvert_index_legacy(data, kind, legacy=False, encoding=None):
 
 
 def _convert_string_array(data, encoding, itemsize=None):
+    """
+    we take a string-like that is object dtype and coerce to a fixed size string type
+
+    Parameters
+    ----------
+    data : a numpy array of object dtype
+    encoding : None or string-encoding
+    itemsize : integer, optional, defaults to the max length of the strings
+
+    Returns
+    -------
+    data in a fixed-length string dtype, encoded to bytes if needed
+    """
 
     # encode if needed
     if encoding is not None and len(data):
-        f = np.vectorize(lambda x: x.encode(encoding), otypes=[np.object])
-        data = f(data)
+        data = Series(data.ravel()).str.encode(encoding).values.reshape(data.shape)
 
     # create the sized dtype
     if itemsize is None:
@@ -4413,7 +4400,20 @@ def _convert_string_array(data, encoding, itemsize=None):
     return data
 
 def _unconvert_string_array(data, nan_rep=None, encoding=None):
-    """ deserialize a string array, possibly decoding """
+    """
+    inverse of _convert_string_array
+
+    Parameters
+    ----------
+    data : fixed length string dtyped array
+    nan_rep : the storage repr of NaN, optional
+    encoding : the encoding of the data, optional
+
+    Returns
+    -------
+    an object array of the decoded data
+
+    """
     shape = data.shape
     data = np.asarray(data.ravel(), dtype=object)
 
@@ -4422,16 +4422,16 @@ def _unconvert_string_array(data, nan_rep=None, encoding=None):
     encoding = _ensure_encoding(encoding)
     if encoding is not None and len(data):
 
-        try:
-            itemsize = lib.max_len_string_array(com._ensure_object(data.ravel()))
-            if compat.PY3:
-                dtype = "U{0}".format(itemsize)
-            else:
-                dtype = "S{0}".format(itemsize)
+        itemsize = lib.max_len_string_array(com._ensure_object(data))
+        if compat.PY3:
+            dtype = "U{0}".format(itemsize)
+        else:
+            dtype = "S{0}".format(itemsize)
+
+        if isinstance(data[0], compat.binary_type):
+            data = Series(data).str.decode(encoding).values
+        else:
             data = data.astype(dtype, copy=False).astype(object, copy=False)
-        except (Exception) as e:
-            f = np.vectorize(lambda x: x.decode(encoding), otypes=[np.object])
-            data = f(data)
 
     if nan_rep is None:
         nan_rep = 'nan'
